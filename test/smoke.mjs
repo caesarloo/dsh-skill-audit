@@ -19,6 +19,7 @@ import { spawn } from 'node:child_process'
 import { cpSync, existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
+import { fileURLToPath } from 'node:url'
 
 const pluginDist = process.env.SMOKE_PLUGIN_DIST ?? new URL('../dist/index.js', import.meta.url).href
 console.log(`plugin under test: ${pluginDist}`)
@@ -26,8 +27,9 @@ const { apply, planAudit, parseReport, resolveEngine, resolveBundledSkillDir, re
   await import(pluginDist)
 
 const PS = 'C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe'
-const HOME = process.env.USERPROFILE ?? process.env.HOME ?? '.'
-const LIVE_AUDIT_SCRIPT = join(HOME, '.dsh', 'skills', 'skill-audit', 'scripts', 'audit-skills.ps1')
+// 引擎真源现在就在本包里（skill/scripts/audit-skills.ps1）：技能根下那份已随分层取消，
+// 于是本套测试审的正是**要发布的那个文件本身**——比"复制一份 live 脚本进沙箱"更贴近契约。
+const LIVE_AUDIT_SCRIPT = fileURLToPath(new URL('../skill/scripts/audit-skills.ps1', import.meta.url))
 
 let failures = 0
 function check(name, ok, detail = '') {

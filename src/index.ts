@@ -16,16 +16,19 @@
 //
 // 审核逻辑不在本插件内（单一真源），按优先级三选一：
 //   1) config.auditScript（显式；指定了却不存在 → 直接报错，不静默回落）
-//   2) 用户态技能 <DSH_HOME>/skills/skill-audit/scripts/audit-skills.ps1 —— 判据真源
-//   3) 包内快照   <pkg>/skill/scripts/audit-skills.ps1 —— 随版本发布的回退副本
+//   2) 用户态技能 <DSH_HOME>/skills/skill-audit/scripts/audit-skills.ps1 —— 可选覆盖位
+//   3) 包内 <pkg>/skill/scripts/audit-skills.ps1 —— 随版本发布的真源
 //
 // 分层（2026-09-17 定）：**常改的**与**不常改的**分开住，各自只有一个真源。
-//   · 判据引擎 → 用户态技能目录里的 scripts/audit-skills.ps1（真源，改完即生效，免发版免重启）；
-//   · 机器专属规则 → 本机扩展技能的 audit_extension（同样改完即生效）；
-//   · 核心流程（边界、触发规则、判据表、豁免与扩展点契约）→ 包内技能，由运行时注册提供。
-// 因此本机用户态技能目录**只留引擎真源、没有 SKILL.md**，它不是"技能"，只是引擎的家。
-// 若某台机器保留了**完整的**用户态技能（含 SKILL.md），则尊重它、不注册——层级是
-// project > runtime > user，无条件注册会遮蔽它（硬约束，见 registerFallbackSkill）。
+//   · 技能正文（边界、触发规则、判据表、豁免与扩展点契约）+ **判据引擎** → 都在**包内**：
+//     正文由运行时注册提供，引擎即包内那份脚本。本机 link 安装时改它们立即生效，但要发版才
+//     对他人生效——**因此不再有"本机真源 vs 包内副本"两份引擎可以分叉**（曾经的真实风险）。
+//   · 机器专属规则 → 本机扩展技能的 audit_extension（改完即生效，永远不必发版）。
+// 注意包内引擎与技能正文**在不同时机生效**：引擎是每次审核现读的文件（改完即生效，不必重启），
+// 而技能正文只在插件启动注册时读一次（改完要重启 dsh）。
+// 用户态那一档仍然保留：某台机器若想用自己的引擎（或想覆盖包内判据），放一份在那即可；
+// 若放的是**完整技能**（含 SKILL.md），则连注册都让位——层级是 project > runtime > user，
+// 无条件注册会遮蔽它（硬约束，见 registerFallbackSkill）。
 // 引擎缺失时工具报明确错误、自动触发静默跳过（不打扰正常写文件）。
 
 import { existsSync, readFileSync } from 'node:fs'
@@ -69,7 +72,7 @@ const DEFAULT_MAX_CONTEXT_CHARS = 2000
 export interface SkillAuditConfig {
   /**
    * 审核脚本路径。**显式指定且不存在时报错，不静默回落**。
-   * 缺省按 用户态技能 → 包内快照 的顺序自动解析（见 resolveEngine）。
+   * 缺省按 用户态技能 → 包内 的顺序自动解析（见 resolveEngine）。
    */
   auditScript?: string
   /** 技能根目录；缺省 <DSH_HOME>/skills。 */
@@ -146,11 +149,12 @@ async function fileExists(path: string): Promise<boolean> {
 // 引擎三个来源，优先级从高到低：
 //   1. config.auditScript —— 显式指定。**指定了却不存在则不静默回落**：显式意图优先于便利，
 //      悄悄换一个引擎跑会让"我明明指了路径"变成难以察觉的错。
-//   2. 用户态技能 <skillsRoot>/skill-audit/scripts/audit-skills.ps1 —— 规则真源，改完即生效。
-//   3. 包内快照 <pkg>/skill/scripts/audit-skills.ps1 —— 随插件版本发布的回退副本。
-// 为什么真源留在用户态而不搬进包：sync.ps1 的 restore 收尾与 AGENTS.md 的手工兜底命令都按
-// **普通文件路径**调用它，而那时插件可能还没装（新机引导）；且用户态改判据立即生效、不必重建
-// 重发重启。三层分工见 skill-audit 技能 §2.0。
+//   2. 用户态技能 <skillsRoot>/skill-audit/scripts/audit-skills.ps1 —— 可选覆盖位（默认不存在）。
+//   3. 包内 <pkg>/skill/scripts/audit-skills.ps1 —— **真源**，随插件版本发布。
+// 真源为什么在包内（2026-09-17 定位）：引擎与技能正文是同一份发布单元，放进包就**只有一份**，
+// 不会再出现"本机改了、包里还是旧的"这种静默分叉；而"改完即生效"照样成立——本机是 link 安装，
+// 包内那份就在项目目录里。代价是改动要发版才对他人成立；新机引导时插件尚未安装、故 restore
+// 收尾无从审核（sync.ps1 已按此降级为跳过）。三层分工见 skill-audit 技能 §2.0。
 
 export type EngineSource = 'config' | 'user-skill' | 'bundled'
 
@@ -181,7 +185,7 @@ export function resolveEngine(options: ResolveEngineOptions): ResolvedEngine | n
   return null
 }
 
-/** 包内 skill/ 快照目录：从本模块向上找含 skill/SKILL.md 的目录（逐文件 dist/ 与打包形态都可定位）。 */
+/** 包内 skill/ 目录（技能正文与引擎的真源）：从本模块向上找含 skill/SKILL.md 的目录（逐文件 dist/ 与打包形态都可定位）。 */
 export function resolveBundledSkillDir(startUrl: string = import.meta.url): string | null {
   let dir = dirname(fileURLToPath(startUrl))
   for (let depth = 0; depth < 6; depth++) {
@@ -236,9 +240,9 @@ export type FallbackRegistration =
 /**
  * 注册包内技能——**仅当用户态没有一份完整的同名技能（含 SKILL.md）时**。
  *
- * 这条判定就是"核心流程进包、常改内容留本机"的分界线：本机的 `<skillsRoot>/skill-audit/`
- * 只留 `scripts/audit-skills.ps1`（判据真源，**没有 SKILL.md**），于是判定通过、核心流程由
- * 包内运行时技能提供；同时 `resolveEngine` 仍优先取用户态那份引擎，判据改动照旧改完即生效。
+ * 守卫的用意：该位置只要出现一份**完整技能**（含 SKILL.md），就说明那台机器要自己维护它，
+ * 插件必须让位。默认情形（该位置不存在，或只有脚本）则由包内提供技能正文——技能正文与判据
+ * 引擎的真源都在包内，故这一支是常态。
  *
  * 硬约束：dsh-skill 的 `register()` 层级是 **project > runtime > user**，而
  * `<DSH_HOME>/skills` 属于 user 层（`source: 'user-dsh'`）——若某台机器上保留了**完整的**
@@ -364,11 +368,9 @@ export function planAudit(
   if (hits.length === 0) return null
 
   // 命中项分两类。**只有含 SKILL.md 的目录才是技能**，可作为定向审核目标；
-  // skillsRoot 下一旦出现"无 SKILL.md 的目录被改写"，本机语义就是**判据引擎真源被改**
-  // （技能目录只留 scripts/ 而正文由运行时技能提供），此时定向审核无从谈起，
-  // 且引擎变了会波及每一个技能 → 一律升级为**全量重审**，让影响面立刻可见。
-  // 顺带消除一个真误报：若仍按目录名送 `-Skill`，引擎会因该目录无 SKILL.md 报 `F1 缺少 SKILL.md`，
-  // 等于每次改判据都被自己拦下。
+  // skillsRoot 下一旦出现"无 SKILL.md 的目录被改写"，它就不是技能（技能目录还没成形，
+  // 或只是有人把脚本放进了技能根），此时定向审核无从谈起 → 一律升级为**全量重审**。
+  // 顺带消除一个真误报：若仍按目录名送 `-Skill`，引擎会因该目录无 SKILL.md 报 `F1 缺少 SKILL.md`。
   let nonSkillTouched = false
   const skills: string[] = []
   for (const name of [...new Set(hits)]) {

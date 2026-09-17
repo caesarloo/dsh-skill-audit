@@ -36,20 +36,21 @@ dsh --profile web --dump-config | Select-String tool-skill-audit
 | # | Source | Path | Notes |
 |---|---|---|---|
 | 1 | `config.auditScript` | whatever you set | Explicit. **If it is set but missing this is an error** — the plugin will not silently run a different engine. |
-| 2 | your own skill | `<skillsRoot>/skill-audit/scripts/audit-skills.ps1` | Preferred when present: it is the editable working copy, so a rule change takes effect on the next audit with no rebuild. |
-| 3 | bundled snapshot | `<package>/skill/scripts/audit-skills.ps1` | Fallback that makes a bare install work. |
+| 2 | an engine in your skills root | `<skillsRoot>/skill-audit/scripts/audit-skills.ps1` | Optional override slot, normally absent. Put one here to use your own rules instead of the shipped ones. |
+| 3 | the package | `<package>/skill/scripts/audit-skills.ps1` | **The source of truth**, shipped with the plugin. One copy only — nothing to keep in sync. |
 
 The plugin registers the `skill-audit` skill at runtime **unless your skills root already holds a full copy (i.e. a `SKILL.md`)**. That guard is mandatory rather than polite: DSH ranks `project > runtime > user`, and a skills root is the *user* layer (`source: 'user-dsh'`) — an unconditional runtime registration would **shadow your own skill**.
 
-The same guard draws the line between stable and evolving content:
+The same split decides what ships and what stays yours:
 
 | Content | Lives in | Cost of a change |
 |---|---|---|
-| Core flow — boundaries, trigger rules, finding table, waiver & extension contracts | the package (registered at runtime) | rebuild + republish |
-| The audit **engine** — `<skillsRoot>/skill-audit/scripts/audit-skills.ps1` | your skills root, with **no `SKILL.md`**: it is the engine's home, not a skill | none — live on the next audit |
-| **Machine-specific rules** — an `audit_extension` declared by a local skill | your skills root | none — live on the next audit |
+| Skill body (boundaries, trigger rules, finding table, waiver & extension contracts) + the audit **engine** | **the package** — the body is registered at runtime, the engine is resolved from the package too | immediate on a linked install; **republish** for everyone else |
+| **Machine-specific rules** — an `audit_extension` declared by one of your own skills | your skills root | none — live on the next audit, never needs a release |
 
-So a bare install gets the whole core flow, while everything you actually keep editing stays on your side, editable without a rebuild or a restart.
+So a bare install gets the whole thing, and the one part that genuinely keeps changing — your own local rules — stays on your side, editable without a rebuild or a restart.
+
+Keeping the engine in the package is what makes a **single copy** possible: there is no second copy in your skills root that could silently drift out of date. You can still put one there to override the shipped engine — that slot is respected — but nothing needs it.
 
 A registered skill is given the bundled directory as its resource base, so the relative script paths inside the skill body still resolve.
 
@@ -87,7 +88,7 @@ Usually none. To customize, add `config` to the entry in the profile's `cordis.p
 | Key | Default | Meaning |
 |---|---|---|
 | `skillsRoot` | `<DSH_HOME>/skills` | Skills root directory |
-| `auditScript` | auto: your skill → bundled snapshot | Audit engine script; set it to pin one (a missing explicit path is an error) |
+| `auditScript` | auto: your skills root → the package | Audit engine script; set it to pin one (a missing explicit path is an error) |
 | `autoAudit` | `true` | `false` disables automatic audits (the `skill_audit` tool stays available) |
 | `powershell` | Windows PowerShell / `pwsh` | PowerShell executable |
 | `timeoutMs` | `120000` | Per-audit timeout |
@@ -102,20 +103,21 @@ The **skills service** is a different kind of dependency: a service of the host 
 
 ### Boundaries
 
-- Contains no audit logic itself: it carries the skill body and the engine as **copies** and relays the engine's output. There are two editable sources of truth — the engine in your skills root, and machine-specific rules in a local skill's `audit_extension`;
+- Contains no audit logic itself: it ships the skill body and the engine, and relays the engine's output. The editable sources of truth are the package (skill body + engine) and machine-specific rules in a local skill's `audit_extension`;
 - Does not rewrite tool input and never blocks a tool call;
 - Does not hook non-tool events (`SessionStart` / `Stop`);
 - Does not watch the skills directory — it triggers after tool calls only.
 
-### Keeping the bundled snapshot in sync (maintainers)
+### Maintaining `skill/` (maintainers)
 
-The two halves of `skill/` have **different origins**: `SKILL.md` is *the* source of truth for the core flow (the author's skills root keeps only the engine, with no `SKILL.md`, so the bundled copy is the one original), while `scripts/audit-skills.ps1` is a byte-for-byte copy of the author's live engine and must be refreshed before publishing:
+Both halves of `skill/` — `SKILL.md` (the skill body) and `scripts/audit-skills.ps1` (the engine) — are **the source of truth**, edited right here in this repository. There is no snapshot step any more: the engine used to live in the author's skills root and had to be copied into the package, which meant a second copy that could silently drift out of date. That copy is gone, and with it the whole class of problem.
 
-```sh
-npm run sync-skill
-```
+Two checks enforce the contract instead:
 
-It copies from `<DSH_HOME>/skills/skill-audit/` and aborts if the engine lost its UTF-8 BOM (Windows PowerShell 5.1 would then mis-decode the Chinese comments and fail to parse the script).
+- `npm test` runs the **real** engine against the bundled skill — laid out exactly like a real skill — and asserts the engine kept its UTF-8 BOM. So the engine cannot ship unparseable and the body cannot ship broken;
+- `prepublishOnly` runs `build && test`, so nothing ships without those checks.
+
+One timing difference is worth remembering: the **engine** is read fresh on every audit, so an edit applies immediately; the **skill body** is read once at plugin startup, so an edit needs a dsh restart.
 
 ### License
 
@@ -155,20 +157,21 @@ dsh --profile web --dump-config | Select-String tool-skill-audit
 | 优先级 | 来源 | 路径 | 说明 |
 |---|---|---|---|
 | 1 | `config.auditScript` | 你指定的路径 | 显式指定。**指定了却不存在会直接报错**——不会偷偷换一个引擎跑。 |
-| 2 | 你自己的技能 | `<skillsRoot>/skill-audit/scripts/audit-skills.ps1` | 存在时优先。这是**可编辑的工作副本**：改判据下一次审核即生效，无需重建。 |
-| 3 | 包内快照 | `<package>/skill/scripts/audit-skills.ps1` | 回退副本，保证"装上就能用"。 |
+| 2 | 你技能根里的一份 | `<skillsRoot>/skill-audit/scripts/audit-skills.ps1` | 可选覆盖位，默认不存在。放一份在这就能用你自己的判据替代包里那份。 |
+| 3 | 包内 | `<package>/skill/scripts/audit-skills.ps1` | **真源**，随插件发布。只有一份，没有需要同步的东西。 |
 
 插件**只在你的技能根里还没有完整副本（即没有 `SKILL.md`）时**才在运行时注册 `skill-audit`。这个保护是硬性要求而非客气：DSH 的层级是 `project > runtime > user`，而技能根属于 **user 层**（`source: 'user-dsh'`）——无条件注册会**遮蔽你自己的技能**。
 
-同一条判定也是「稳定」与「常改」的分界线：
+同一条切分决定什么进包、什么留给你：
 
 | 内容 | 住在哪 | 改一次的代价 |
 |---|---|---|
-| 核心流程——边界、触发规则、判据表、豁免与扩展点契约 | 包内（运行时注册） | 重建 + 重发 |
-| 审核**引擎**——`<skillsRoot>/skill-audit/scripts/audit-skills.ps1` | 你的技能根，**没有 `SKILL.md`**：它是引擎的家，不是技能 | 无——下一次审核即生效 |
-| **机器专属规则**——某个本机技能声明的 `audit_extension` | 你的技能根 | 无——下一次审核即生效 |
+| 技能正文（边界、触发规则、判据表、豁免与扩展点契约）+ 审核**引擎** | **都在包内**——正文由运行时注册，引擎也从包内解析 | link 安装下立即生效；对他人要**重发一版** |
+| **机器专属规则**——你自己某个技能声明的 `audit_extension` | 你的技能根 | 无——下一次审核即生效，永不需要发版 |
 
-所以裸装即可拿到完整核心流程，而你真正会反复改的部分全都留在自己手里，不必重建、不必重启。
+所以裸装即可拿到全部能力，而真正会一直变的那部分——你自己的本机规则——留在自己手里，不必重建、不必重启。
+
+引擎留在包内才使"**只有一份**"成为可能：技能根下不再有第二份副本可以悄悄变旧。你仍然可以放一份在那里覆盖包内引擎（那个位置被尊重），但没有任何东西依赖它。
 
 注册的技能以包内目录作为资源基准（resource base），因此技能正文里的相对脚本路径仍然可解析。
 
@@ -206,7 +209,7 @@ skill_audit({ skill: 'a,b' })    # 只审指定技能（逗号分隔）
 | 配置键 | 缺省值 | 含义 |
 |---|---|---|
 | `skillsRoot` | `<DSH_HOME>/skills` | 技能根目录 |
-| `auditScript` | 自动：用户态技能 → 包内快照 | 审核引擎脚本；显式指定可钉住（指定却不存在会报错） |
+| `auditScript` | 自动：技能根 → 包内 | 审核引擎脚本；显式指定可钉住（指定却不存在会报错） |
 | `autoAudit` | `true` | `false` 关闭自动审核（`skill_audit` 工具仍可用） |
 | `powershell` | Windows PowerShell / `pwsh` | PowerShell 可执行文件 |
 | `timeoutMs` | `120000` | 单次审核超时 |
@@ -221,20 +224,21 @@ skill_audit({ skill: 'a,b' })    # 只审指定技能（逗号分隔）
 
 ### 边界（明确不做）
 
-- 本身不含审核逻辑：它携带技能正文与引擎的**副本**并回传其输出；可编辑的真源有两处——判据引擎在你的技能根，机器专属规则在本机技能的 `audit_extension`；
+- 本身不含审核逻辑：它携带技能正文与引擎、并回传引擎的输出；可编辑的真源有两处——包内（技能正文 + 引擎），以及本机技能里的 `audit_extension`；
 - 不改写工具输入、不阻塞工具调用；
 - 不覆盖 `SessionStart` / `Stop` 等非工具事件；
 - 不监视技能目录的文件变化（只在工具调用后触发）。
 
-### 维护内置快照（插件作者）
+### 维护 `skill/`（插件作者）
 
-`skill/` 里两部分的来源**不同**：`SKILL.md` 是**核心流程的真源**（作者本机的技能目录只留引擎、没有 SKILL.md，所以包内这份就是唯一原件）；`scripts/audit-skills.ps1` 是作者本机引擎的逐字节副本，发布前需刷新：
+`skill/` 里两部分——`SKILL.md`（技能正文）与 `scripts/audit-skills.ps1`（引擎）——**都是真源**，就在本仓库里直接编辑。**同步步骤已经取消**：引擎过去住在作者技能根里、必须复制进包，于是存在第二份副本、随时可能悄悄变旧。那份副本连同这一整类问题都已消失。
 
-```sh
-npm run sync-skill
-```
+现在由两道检查守住契约：
 
-它从 `<DSH_HOME>/skills/skill-audit/` 复制，并在引擎丢掉 UTF-8 BOM 时直接中止（否则 Windows PowerShell 5.1 会把中文注释按 GBK 解码、脚本解析失败）。
+- `npm test` 用**真引擎**审包内技能（按真实技能布局摆好），并断言引擎的 UTF-8 BOM 还在——所以引擎不可能以"解析不了"的状态发布，技能正文也不可能带着断裂发布；
+- `prepublishOnly` 跑 `build && test`，没通过这两道就发不出去。
+
+一个生效时机差异值得记住：**引擎**每次审核现读，改完立即生效；**技能正文**只在插件启动时读一次，改完要重启 dsh。
 
 ### License
 

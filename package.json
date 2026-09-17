@@ -1,7 +1,7 @@
 {
   "name": "@caesarloo/dsh-skill-audit",
   "version": "0.2.0",
-  "description": "Audit DSH skills automatically: a host-layer tools/post-execute plugin that runs the skill-audit engine after skill files change (write/edit/shell) or after a bulk restore/backup (any tool invoked with mode: restore|backup), feeding findings back to the model as context; also registers the skill_audit tool.",
+  "description": "Audit DSH skills automatically: a host-layer tools/post-execute plugin that ships both the skill body and the audit engine, runs the engine after skill files change (write/edit/shell) or after a bulk restore/backup (any tool invoked with mode: restore|backup), feeding findings back to the model as context; also registers the skill_audit tool.",
   "keywords": [
     "dsh",
     "deepseek-harness",
@@ -36,8 +36,7 @@
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "test": "node test/smoke.mjs && node scripts/check-leaks.mjs",
     "check-leaks": "node scripts/check-leaks.mjs",
-    "sync-skill": "node scripts/sync-skill.mjs",
-    "prepublishOnly": "npm run build && npm run check-leaks"
+    "prepublishOnly": "npm run build && npm test"
   },
   "peerDependencies": {
     "@deepseek-ai/cordis": "^4.0.1",
