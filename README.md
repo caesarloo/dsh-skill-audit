@@ -12,7 +12,7 @@ A DeepSeek Harness plugin that **audits your skills the moment they change**: af
 
 The audit rules live in the `skill-audit` skill's engine: frontmatter contract (`name` / `description` / `whenToUse` / `version`), script usability (UTF-8 BOM + parseable by Windows PowerShell 5.1), `SKILL.md` reference integrity, credential leakage, machine-specific paths and dangerous command patterns.
 
-- **Automatic** — audits after skill files are written or edited, and after `dsh_config_git_backup`'s `restore` / `backup`;
+- **Automatic** — audits after skill files are written or edited, and after a bulk restore / backup (any tool invoked with `mode: 'restore'` or `mode: 'backup'`);
 - **Speaks only when there is something to act on** — findings are injected as context only when `fail` / `warn` exist; a clean run stays silent and just writes a log;
 - **Never blocks** — an audit cannot fail your tool call. The file is already written, so surfacing the problem to the model is the right move;
 - **On demand** — the `skill_audit` tool.
@@ -119,7 +119,7 @@ MIT
 
 审核规则由 `skill-audit` 技能的引擎执行，包含：frontmatter 契约（`name` / `description` / `whenToUse` / `version`）、技能内脚本的可用性（UTF-8 BOM + Windows PowerShell 5.1 可解析）、`SKILL.md` 引用完整性、凭据泄漏、机器专属路径与危险命令模式。
 
-- **自动** —— 技能文件被写入 / 编辑之后，或 `dsh_config_git_backup` 的 `restore` / `backup` 之后自动审核；
+- **自动** —— 技能文件被写入 / 编辑之后，或任何整批 restore / backup（以 `mode: 'restore'` 或 `mode: 'backup'` 调用的工具）之后自动审核；
 - **有发现才提示** —— 只在存在 `fail` / `warn` 时把结论作为上下文回传给模型；全部通过时保持安静，只写审核日志；
 - **不阻塞** —— 审核不会让你的工具调用失败。文件已经写入，把问题摆到模型面前才是正确做法；
 - **可主动调用** —— `skill_audit` 工具。

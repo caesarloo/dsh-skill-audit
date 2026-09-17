@@ -131,7 +131,7 @@ check(
   'edit into a skill script → scoped',
   planAudit('edit', { file_path: join(skillsRoot, 'demo-bad', 'scripts', 'nobom.ps1') }, skillsRoot)?.skills?.[0] === 'demo-bad',
 )
-// 「整批改写」判据必须与工具名无关：原先写成 toolName === 'dsh_config_git_backup'，对没装那个插件的
+// 「整批改写」判据必须与工具名无关：原先按工具名硬匹配，对没装那个备份插件的用户是死逻辑。
 // 用户是死逻辑。下面一律用中性名字，确保这条判据真的是按**调用形态**（mode 参数）而非名字触发的。
 check(
   'any tool with mode:restore → full audit (name-independent)',
@@ -208,7 +208,7 @@ check('no context for read', !out?.additionalContexts, JSON.stringify(out))
 
 console.log('--- 8) post-execute: restore audits everything (fails included) ---')
 out = await postExecute(
-  { name: 'dsh_config_git_backup', arguments: { mode: 'restore' }, signal: exec.signal },
+  { name: 'any_backup_tool', arguments: { mode: 'restore' }, signal: exec.signal },
   { content: [] },
   nextReturning({ kind: 'enter' }),
 )
@@ -226,7 +226,7 @@ apply(
   { skillsRoot: warnOnlyRoot, auditScript, powershell: PS },
 )
 out = await warnOnlyHandler(
-  { name: 'dsh_config_git_backup', arguments: { mode: 'restore' }, signal: exec.signal },
+  { name: 'any_backup_tool', arguments: { mode: 'restore' }, signal: exec.signal },
   { content: [] },
   nextReturning({ kind: 'enter' }),
 )

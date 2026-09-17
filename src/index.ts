@@ -293,7 +293,7 @@ const WRITE_HINTS = /(?:Set-Content|Out-File|Add-Content|Clear-Content|Copy-Item
  * 「整批改写」的调用形态：这类工具会大范围改动技能目录（备份 / 恢复 / 同步），但**参数里不带路径**，
  * 没法靠路径判定，只能靠调用形态。判据是**参数**而不是工具名——插件因此不绑定任何具体备份插件。
  *
- * 2026-09-17 去硬依赖：原先写成 `toolName === 'dsh_config_git_backup'`，对没有装那个插件的用户是纯死逻辑。
+ * 2026-09-17 去硬依赖：原先写成按**工具名**硬匹配，对没有装那个备份插件的用户是纯死逻辑。
  * 现在只要参数是 `mode: 'restore' | 'backup'` 就触发，无论工具叫什么（真实备份操作必然带 `mode`，
  * 故行为不变）；模式名不叫 `mode` 的场景用 config.fullAuditTools 显式补充。
  */
