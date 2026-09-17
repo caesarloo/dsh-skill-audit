@@ -10,7 +10,7 @@
 // 两条通道：
 //   1) `tools/post-execute` 自动触发（写入**之后**，审的是新内容）：
 //        · write / edit 命中 <DSH_HOME>/skills/<技能>/ → 只审该技能
-//        · dsh_config_git_backup 的 restore / backup → 全量（整批覆盖 / 入库前）
+//        · 调用形态为「整批改写」的工具（参数 mode 为 restore / backup）→ 全量（整批覆盖 / 入库前）
 //        · pwsh 等 shell，命令行同时含 skills 与写操作迹象 → 全量
 //   2) `skill_audit` 工具 —— agent 可主动定向或全量审核。
 //
@@ -67,6 +67,13 @@ export interface SkillAuditConfig {
   timeoutMs?: number
   /** 回传给模型的上下文字符上限。缺省 2000。 */
   maxContextChars?: number
+  /**
+   * 额外把哪些工具视为「整批改写技能目录」（触发全量审核）。
+   * **缺省为空**：通用规则已覆盖 `mode` 为 restore / backup 的调用形态，因此本插件
+   * **不绑定任何具体备份插件**。只有当你所用工具的"模式"参数不叫 `mode`、或取值不在这两个词里时，
+   * 才需要在这里补上工具名。
+   */
+  fullAuditTools?: string[]
 }
 
 interface Finding {
@@ -282,14 +289,33 @@ const FILE_WRITE_TOOLS = new Set([
 ])
 const WRITE_HINTS = /(?:Set-Content|Out-File|Add-Content|Clear-Content|Copy-Item|Move-Item|Remove-Item|New-Item|robocopy|git\s+(?:checkout|restore|apply))/i
 
-/** 决定这次工具调用要不要触发审核；返回 null 表示与该工具无关。 */
-export function planAudit(toolName: string, args: unknown, skillsRoot: string): Plan | null {
-  const lower = toolName.toLowerCase()
+/**
+ * 「整批改写」的调用形态：这类工具会大范围改动技能目录（备份 / 恢复 / 同步），但**参数里不带路径**，
+ * 没法靠路径判定，只能靠调用形态。判据是**参数**而不是工具名——插件因此不绑定任何具体备份插件。
+ *
+ * 2026-09-17 去硬依赖：原先写成 `toolName === 'dsh_config_git_backup'`，对没有装那个插件的用户是纯死逻辑。
+ * 现在只要参数是 `mode: 'restore' | 'backup'` 就触发，无论工具叫什么（真实备份操作必然带 `mode`，
+ * 故行为不变）；模式名不叫 `mode` 的场景用 config.fullAuditTools 显式补充。
+ */
+const BULK_MODES = new Set(['restore', 'backup'])
 
-  if (lower === 'dsh_config_git_backup') {
-    const mode = String((args as { mode?: unknown } | undefined)?.mode ?? '').toLowerCase()
-    if (mode && mode !== 'restore' && mode !== 'backup') return null
-    return { skills: null, scope: `dsh_config_git_backup(${mode || '?'}) → 全量` }
+/** 决定这次工具调用要不要触发审核；返回 null 表示与该工具无关。 */
+export function planAudit(
+  toolName: string,
+  args: unknown,
+  skillsRoot: string,
+  fullAuditTools: readonly string[] = [],
+): Plan | null {
+  const lower = toolName.toLowerCase()
+  const record = (args ?? {}) as Record<string, unknown>
+
+  if (fullAuditTools.some((t) => t.toLowerCase() === lower)) {
+    return { skills: null, scope: `${toolName}（配置为整批改写） → 全量` }
+  }
+
+  const mode = typeof record.mode === 'string' ? record.mode.toLowerCase() : ''
+  if (BULK_MODES.has(mode)) {
+    return { skills: null, scope: `${toolName}(${mode}) → 全量` }
   }
 
   if (SHELL_TOOLS.has(lower)) {
@@ -346,6 +372,7 @@ export function apply(ctx: Context, config: SkillAuditConfig = {}): void {
     config.maxContextChars && config.maxContextChars > 0
       ? config.maxContextChars
       : DEFAULT_MAX_CONTEXT_CHARS
+  const fullAuditTools = Array.isArray(config.fullAuditTools) ? config.fullAuditTools : []
 
   async function runAudit(skills: string[] | null, signal?: AbortSignal): Promise<RunOutcome> {
     if (!(await fileExists(auditScript))) {
@@ -572,7 +599,7 @@ export function apply(ctx: Context, config: SkillAuditConfig = {}): void {
         try {
           const toolName = typeof exec?.name === 'string' ? exec.name : ''
           if (!toolName || typeof next !== 'function') return await next?.()
-          const plan = planAudit(toolName, exec?.arguments, skillsRoot)
+          const plan = planAudit(toolName, exec?.arguments, skillsRoot, fullAuditTools)
           if (!plan) return await next()
 
           const run = await runAudit(plan.skills, exec?.signal)

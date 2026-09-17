@@ -131,11 +131,26 @@ check(
   'edit into a skill script → scoped',
   planAudit('edit', { file_path: join(skillsRoot, 'demo-bad', 'scripts', 'nobom.ps1') }, skillsRoot)?.skills?.[0] === 'demo-bad',
 )
+// 「整批改写」判据必须与工具名无关：原先写成 toolName === 'dsh_config_git_backup'，对没装那个插件的
+// 用户是死逻辑。下面一律用中性名字，确保这条判据真的是按**调用形态**（mode 参数）而非名字触发的。
 check(
-  'dsh_config_git_backup restore → full audit',
-  planAudit('dsh_config_git_backup', { mode: 'restore' }, skillsRoot)?.skills === null,
+  'any tool with mode:restore → full audit (name-independent)',
+  planAudit('some_backup_plugin', { mode: 'restore' }, skillsRoot)?.skills === null,
 )
-check('dsh_config_git_backup bad mode → null', planAudit('dsh_config_git_backup', { mode: 'nonsense' }, skillsRoot) === null)
+check(
+  'any tool with mode:backup → full audit (case-insensitive)',
+  planAudit('another_sync_tool', { mode: 'BACKUP' }, skillsRoot)?.skills === null,
+)
+check('unrelated mode → null', planAudit('some_backup_plugin', { mode: 'nonsense' }, skillsRoot) === null)
+check('no mode argument → null', planAudit('some_backup_plugin', { dryRun: true }, skillsRoot) === null)
+check(
+  'fullAuditTools opt-in covers tools whose mode arg is named differently',
+  planAudit('my_restore_tool', { op: 'apply' }, skillsRoot, ['my_restore_tool'])?.skills === null,
+)
+check(
+  'fullAuditTools does not leak onto other tools',
+  planAudit('other_tool', { op: 'apply' }, skillsRoot, ['my_restore_tool']) === null,
+)
 check('read-only shell → null', planAudit('pwsh', { command: 'Get-ChildItem C:\\x\\skills' }, skillsRoot) === null)
 check(
   'shell writing into skills → full audit',

@@ -57,8 +57,10 @@ Trigger scope:
 | Your action | Audit scope |
 |---|---|
 | `write` / `edit` on a skill file | that skill only (fast) |
-| `dsh_config_git_backup` `restore` / `backup` | everything (bulk overwrite / pre-commit check) |
+| any tool invoked with `mode: 'restore'` or `mode: 'backup'` | everything (bulk overwrite / pre-commit check) |
 | a shell command rewriting the skills directory | everything |
+
+Bulk detection keys on the **call shape**, not on a tool name — so the plugin works with any backup plugin, and with none. If yours names its mode argument differently, list its tool name in `fullAuditTools`.
 
 Reporting is tiered by scenario:
 
@@ -80,6 +82,7 @@ Usually none. To customize, add `config` to the entry in the profile's `cordis.p
 | `powershell` | Windows PowerShell / `pwsh` | PowerShell executable |
 | `timeoutMs` | `120000` | Per-audit timeout |
 | `maxContextChars` | `2000` | Cap on injected context length |
+| `fullAuditTools` | `[]` | Extra tool names to treat as bulk rewrites of the skills tree. Usually unnecessary: the generic rule already covers calls whose `mode` is `restore` or `backup`. |
 
 ### Dependencies
 
@@ -161,8 +164,10 @@ skill_audit({ skill: 'a,b' })    # 只审指定技能（逗号分隔）
 | 你的操作 | 审核范围 |
 |---|---|
 | 用 `write` / `edit` 改某个技能的文件 | 只审**该技能**（快） |
-| `dsh_config_git_backup` 的 `restore` / `backup` | **全量**（整批覆盖 / 入库前体检） |
+| 任何以 `mode: 'restore'` 或 `mode: 'backup'` 调用的工具 | **全量**（整批覆盖 / 入库前体检） |
 | 用 shell 命令改写技能目录 | **全量** |
+
+「整批改写」判定的是**调用形态**而不是工具名——所以本插件配合任何备份插件都能工作，没有也不影响。若你所用工具的模式参数不叫 `mode`，把它的工具名列进 `fullAuditTools` 即可。
 
 提示强度按场景分级：
 
@@ -184,6 +189,7 @@ skill_audit({ skill: 'a,b' })    # 只审指定技能（逗号分隔）
 | `powershell` | Windows PowerShell / `pwsh` | PowerShell 可执行文件 |
 | `timeoutMs` | `120000` | 单次审核超时 |
 | `maxContextChars` | `2000` | 回传上下文的字符上限 |
+| `fullAuditTools` | `[]` | 额外视为「整批改写技能目录」的工具名。通常不需要：通用规则已覆盖 `mode` 为 `restore` / `backup` 的调用。 |
 
 ### 依赖约定
 

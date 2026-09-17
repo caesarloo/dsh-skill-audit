@@ -53,7 +53,7 @@ metadata:
 
 插件在 harness 进程内监听 `tools/post-execute`，用 **`ctx.subprocess`（host 层）** 跑本技能的审核引擎，把结论作为上下文回传给模型。
 
-- **触发规则**：**写入类文件工具**（`write`/`edit`/`multi_edit`/`notebook_edit`/`apply_patch` …）命中 `<DSH_HOME>/skills/<技能>/` → 只审该技能；备份工具的 `restore`/`backup` → 全量；`pwsh` 等 shell 的命令行同时含 `skills` 与写操作迹象（`Set-Content`/`Copy-Item`/`Remove-Item`/`robocopy` …）→ 全量；其它 → 静默。**只读工具（`read`/`glob`/`grep`）刻意不触发**——它们同样携带 `file_path` 却不改内容；不加这条白名单，每读一次技能文件就会注入一次审核上下文。
+- **触发规则**：**写入类文件工具**（`write`/`edit`/`multi_edit`/`notebook_edit`/`apply_patch` …）命中 `<DSH_HOME>/skills/<技能>/` → 只审该技能；**任何以 `mode: restore` / `mode: backup` 调用的工具** → 全量（判据是**调用形态**而不是工具名，因此不绑定任何具体备份插件——没有装备份插件的用户也不会因此产生死逻辑）；`pwsh` 等 shell 的命令行同时含 `skills` 与写操作迹象（`Set-Content`/`Copy-Item`/`Remove-Item`/`robocopy` …）→ 全量；其它 → 静默。**只读工具（`read`/`glob`/`grep`）刻意不触发**——它们同样携带 `file_path` 却不改内容；不加这条白名单，每读一次技能文件就会注入一次审核上下文。
 - **审的是新内容**：在 `post-execute`（**写入之后**）执行——`pre-execute` 只能审到旧文件（第三方 `dsh-skill-authoring` 的 pre-execute + 跳过 edit 就是这个缺陷）。
 - **上下文分级**：定向单技能详列 fail + warn；**全量场景**只详列 fail、warn 压成一行汇总（warn 多时逐条列会把上下文挤爆）；**全量且只有 warn 时完全不注入**（背景噪音不打断写入）；全部通过同样保持安静，只写审核日志。
 - **不阻塞**：任何异常都被吞掉并委托 `next()`，绝不影响工具调用本身。
