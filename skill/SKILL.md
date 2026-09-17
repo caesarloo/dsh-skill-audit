@@ -57,7 +57,7 @@ metadata:
 - **引擎单一真源**：插件不含审核规则，只负责"触发 + 回传"；规则始终在本技能的 `scripts/audit-skills.ps1`。
 - **必须重启 dsh 的三种情形**：① 装新 bundle（含本插件首次安装）；② 改 `cordis.patch.yml` 的 `insert` —— `patchReload: live` **不会**把新增条目应用到运行中的进程（2026-09-17 实测：改完 patch 等 10 秒再改技能，钩子依旧未被调用）；③ **改插件源码并重建 `dist/`** —— HMR 不监视 link 项目的 `dist/`（2026-09-17 实测：改完重建、进程仍走旧逻辑，`read` 依旧触发审核）。
 
-> **为什么不用 hooks.json + 钩子桥接（重要，别再走回头路）**：DSH 自带的 `@deepseek-ai/dsh-hooks-claude-code`、以及所有第三方同类 hooks 插件（`dsh-hooks-plugin`、`dsh-plugin-hooks`）都通过 **`ctx.shell`** 执行钩子命令。本机没有可用的沙箱 runner（Windows ACL 后端未挂载）时，执行器**按设计 fail-closed**，命令根本不会启动——会话日志里表现为 `hook/invoked` 有记录、`hook/result` 恒为 `sandbox mode "workspace-write" ... no sandbox backend is usable`（2026-09-17 实测 180 条全部如此）。**此时 hooks.json 配得再对也没用：这不是配置问题，是接缝限制。** 绕开它的唯一办法是走 host 层（`ctx.subprocess`），这正是本插件采用的路线。`~/.dsh/hooks.json` 与 `hook-post-tool.ps1` 保留备查，patch 里的桥接条目已注释停用（沙箱后端将来可用时可复活）。
+> **为什么不用 hooks.json + 钩子桥接（重要，别再走回头路）**：DSH 自带的 `@deepseek-ai/dsh-hooks-claude-code`、以及所有第三方同类 hooks 插件（`dsh-hooks-plugin`、`dsh-plugin-hooks`）都通过 **`ctx.shell`** 执行钩子命令。本机没有可用的沙箱 runner（Windows ACL 后端未挂载）时，执行器**按设计 fail-closed**，命令根本不会启动——会话日志里表现为 `hook/invoked` 有记录、`hook/result` 恒为 `sandbox mode "workspace-write" ... no sandbox backend is usable`（2026-09-17 实测 180 条全部如此）。**此时 hooks.json 配得再对也没用：这不是配置问题，是接缝限制。** 绕开它的唯一办法是走 host 层（`ctx.subprocess`），这正是本插件采用的路线。**钩子入口脚本已于 2026-09-17 删除**（含插件包内快照）：既然这条路线已被证明走不通、host 层插件也已能工作，「沙箱后端将来可用时再复活」的理由就不成立了，留着它等于自相矛盾。本机那份 `~/.dsh/hooks.json`（不入备份仓库）留作**配置形状的记录**；patch 里的桥接条目仍注释停用。脚本本体可从 git 历史 `5ba562c` 取回。
 
 ### 2.2 副通道：`sync.ps1` 的 restore 挂点（覆盖"从 dsh 恢复"）
 
@@ -179,7 +179,6 @@ R1 的 warn 分支针对的是"引用了**不属于本技能**、或**尚未生�
 | 脚本 | 用途 | 主要参数 |
 |---|---|---|
 | `scripts/audit-skills.ps1` | 静态审核引擎（本技能唯一的判据真源，插件与 sync.ps1 都调它） | `-Skill <名,...>`、`-SkillsRoot <目录>`、`-Json`、`-NoLog` |
-| `scripts/hook-post-tool.ps1` | `PostToolUse` 钩子入口（**当前未启用**，见 §2.1 的说明；保留备查） | 无（读 stdin JSON） |
 
 两个脚本都必须带 UTF-8 BOM（由 `powershell` 5.1 执行且含中文）。审核引擎另在开头把 `[Console]::OutputEncoding` 设为 UTF-8——否则 5.1 按控制台代码页（GBK）写 stdout，插件侧 Node 按 UTF-8 解码就是乱码（2026-09-17 实测踩坑）。
 
