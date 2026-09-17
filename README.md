@@ -96,7 +96,9 @@ Usually none. To customize, add `config` to the entry in the profile's `cordis.p
 
 ### Dependencies
 
-`@deepseek-ai/dsh-tools`, `@deepseek-ai/dsh-subprocess` and `@deepseek-ai/dsh-llm` are declared as **optional peerDependencies** and provided by the host; the package bundles none of them. This is deliberate: a second copy inside the profile would create two module instances and break tool registration. `dsh-llm` is used only to build the context message — if it is unavailable, the audit still runs and only the context injection is skipped. The skills service (`ctx.skills`) is used through a structural type rather than a package import, so registering the skill introduces no further dependency.
+`@deepseek-ai/dsh-tools`, `@deepseek-ai/dsh-subprocess` and `@deepseek-ai/dsh-llm` are declared as **optional peerDependencies** and provided by the host; the package bundles none of them. This is deliberate: a second copy inside the profile would create two module instances and break tool registration. `dsh-llm` is used only to build the context message — if it is unavailable, the audit still runs and only the context injection is skipped.
+
+The **skills service** is a different kind of dependency: a service of the host process rather than a package, and it must be declared in `inject`. That declaration is mandatory rather than cosmetic — cordis **throws** on an undeclared service property instead of returning `undefined`, so reading `ctx.skills` without it crashes plugin loading (observed 2026-09-17: `cannot get property "skills" without inject` → `plugin tree failed to load`), and a defensive `undefined` check never gets the chance to run. The service itself is always present: `@deepseek-ai/dsh-base` provides it, and every profile is built on that.
 
 ### Boundaries
 
@@ -213,7 +215,9 @@ skill_audit({ skill: 'a,b' })    # 只审指定技能（逗号分隔）
 
 ### 依赖约定
 
-`@deepseek-ai/dsh-tools`、`@deepseek-ai/dsh-subprocess`、`@deepseek-ai/dsh-llm` 声明为 **optional peerDependencies**，由宿主提供，本包不打包。这是刻意的：它们若与主包各装一份会形成两个模块实例，导致工具注册失败。`dsh-llm` 仅用于构造回传消息，缺失时插件降级为「审核照跑、不注入上下文」。技能服务（`ctx.skills`）通过**结构化类型**访问而非 import 包，因此注册技能不引入任何新依赖。
+`@deepseek-ai/dsh-tools`、`@deepseek-ai/dsh-subprocess`、`@deepseek-ai/dsh-llm` 声明为 **optional peerDependencies**，由宿主提供，本包不打包。这是刻意的：它们若与主包各装一份会形成两个模块实例，导致工具注册失败。`dsh-llm` 仅用于构造回传消息，缺失时插件降级为「审核照跑、不注入上下文」。
+
+**技能服务**是另一类依赖：它是宿主进程的服务而非包，且**必须**在 `inject` 里声明。这个声明不是形式——cordis 对未声明的服务属性会**直接抛错**而不是返回 `undefined`，所以不声明就读 `ctx.skills` 会让插件装载失败（2026-09-17 实测：`cannot get property "skills" without inject` → `plugin tree failed to load`），"读了再判空"的兜底根本没机会执行。该服务本身在所有环境都存在：由 `@deepseek-ai/dsh-base` 提供，而每个 profile 都基于它。
 
 ### 边界（明确不做）
 

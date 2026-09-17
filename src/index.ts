@@ -40,7 +40,16 @@ import type {} from '@deepseek-ai/dsh-subprocess'
 // Plugin display name, shown in loader diagnostics.
 export const name = 'tool-skill-audit'
 
-export const inject = ['tools', 'subprocess']
+// 'skills' 必须在 inject 里声明，**不能靠"读了再判空"**：cordis 对未在 inject 声明过的
+// 服务属性直接抛错，而不是返回 undefined（2026-09-17 首启崩溃实测：
+// `cannot get property "skills" without inject` → plugin tree failed to load），
+// 于是 registerFallbackSkill 里 `skills === undefined` 的兜底根本到不了。
+// 代价：cordis 4 的 inject 只有**必需**语义（没有 required/optional 之分），本插件会等
+// skills 服务就绪才 apply。本项目里无风险——skills 由 `@deepseek-ai/dsh-base` 提供
+// （实测 web / headless 两个 profile 都基于它），而本 bundle 排在 bundles 末尾。
+// 备选：cordis 另有 `ctx.get('skills')`，它**不需要 inject**、未提供时返回 undefined；
+// 若将来要让"审核为主、注册技能为辅"彻底解耦（审核不因注册失败而受累），改用它才是正解。
+export const inject = ['tools', 'subprocess', 'skills']
 
 const SKILL_NAME = 'skill-audit'
 const ENGINE_RELATIVE = join('scripts', 'audit-skills.ps1')
@@ -203,7 +212,10 @@ export function rewriteEnginePaths(content: string, enginePath: string): string 
     .replace(/<DSH_HOME>[\\/]skills[\\/]skill-audit[\\/]scripts[\\/]audit-skills\.ps1/g, enginePath)
 }
 
-/** dsh-skill 的技能注册服务（结构化声明，避免为一行调用引入新的包依赖）。 */
+/**
+ * dsh-skill 的技能注册服务。**类型**用结构化声明（不为一行调用引入包依赖）；
+ * **运行时**依赖则由 `inject` 声明——见文件头 `inject` 处为什么不能只靠判空。
+ */
 interface SkillServiceLike {
   register(skill: {
     name: string
@@ -232,6 +244,9 @@ export type FallbackRegistration =
  * `<DSH_HOME>/skills` 属于 user 层（`source: 'user-dsh'`）——若某台机器上保留了**完整的**
  * 用户态技能，无条件注册同名 runtime 技能会**遮蔽它**（2026-09-17 查 dsh-skill 的
  * `lib/types/index.d.ts` 确认）。故这里先做文件系统判定，存在就一步都不做。
+ *
+ * `skipped-no-service` 是**防御性**分支：skills 已在 `inject` 里声明，服务必然就绪，
+ * 正常跑不到；留着是因为"服务在、但形态变了（没有 register）"无法由 inject 保证。
  */
 export function registerFallbackSkill(
   ctx: unknown,
