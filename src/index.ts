@@ -2,10 +2,10 @@
 //
 // 为什么必须是插件，而不是 hooks 桥接：
 //   @deepseek-ai/dsh-hooks-claude-code 通过 `ctx.shell` 运行钩子命令。当宿主没有可用的沙箱
-//   runner 时（本机 Windows 实测：`SANDBOX_UNAVAILABLE`，执行器按设计 fail-closed、绝不静默
-//   降级），钩子命令根本无法启动 —— hooks.json 配得再对也没用。本插件在 harness 进程内用
-//   `ctx.subprocess`（host 层）直接跑审核脚本，绕开该限制；这也是官方对"没有 Claude Code
-//   对应物的定制行为"给出的推荐形态。
+//   runner 时（执行器按设计 fail-closed、绝不静默降级，表现为 `SANDBOX_UNAVAILABLE`），钩子
+//   命令根本无法启动 —— 钩子配置配得再对也没用。本插件在 harness 进程内用 `ctx.subprocess`
+//   （host 层）直接跑审核脚本，绕开该限制；这也是官方对"没有 Claude Code 对应物的定制行为"
+//   给出的推荐形态。
 //
 // 两条通道：
 //   1) `tools/post-execute` 自动触发（写入**之后**，审的是新内容）：
