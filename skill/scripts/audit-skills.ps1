@@ -9,7 +9,7 @@
           whenToUse 建议存在；version / last_updated 建议存在        → fail / warn
       S1  脚本可用性：技能内所有 .ps1 必须是 UTF-8 with BOM，且能被
           PowerShell 5.1 解析（errs=0）—— 无 BOM 的中文脚本在 5.1 下按 GBK
-          解码会解析失败（见 {local-skill} §7.1）                  → fail
+          解码会解析失败                                              → fail
       R1  引用完整性：SKILL.md 里 `scripts/xxx.ps1` 这类相对路径引用必须真实存在；
           子目录在而文件缺 = fail（真断裂）；引用落在**别的技能**里 = warn（跨技能引用，
           应改为点名技能名 + related_skills）；都不在 = warn（运行时生成/外部来源） → fail / warn
@@ -45,7 +45,7 @@
 .EXAMPLE
     powershell -NoProfile -ExecutionPolicy Bypass -File audit-skills.ps1
 .EXAMPLE
-    powershell -NoProfile -ExecutionPolicy Bypass -File audit-skills.ps1 -Skill {local-skill} -Json
+    powershell -NoProfile -ExecutionPolicy Bypass -File audit-skills.ps1 -Skill my-skill-a,my-skill-b -Json
 #>
 [CmdletBinding()]
 param(
@@ -298,11 +298,10 @@ function Invoke-SkillAudit {
 
             # —— F2 依赖声明完整性（只做「文件系统可判定」的部分）——
             # 为什么不查"指向的技能是否存在"：DSH 允许**插件在运行时注册技能**——磁盘上没有 SKILL.md，
-            # 例如 @jieai/dsh-plugin-vet 注册的 {local-skill}（其 lib/skills/audit-protocol.js 只是把
-            # 包内的 AUDIT_PROTOCOL.md 注册进会话技能目录）。也就是说"技能名"的解析域是**运行时技能目录**，
-            # 不是文件系统；静态脚本查不到，查了必然误报（2026-09-17 实测：此检查一上线就误报
-            # skill-audit 声明的 {local-skill}）。故这里只报**一定错**的两种：自依赖、重复项。
-            # 「悬空声明」检测需要活的技能目录 → 属**插件侧**能力（见 SKILL.md §2.1 的三层分工）。
+            # 只在进程内的技能目录里可见。也就是说"技能名"的解析域是**运行时技能目录**，不是文件
+            # 系统；静态脚本查不到，查了必然误报（此检查一上线就误报过：某运行时注册的技能被当成
+            # 悬空声明）。故这里只报**一定错**的两种：自依赖、重复项。
+            # 「悬空声明」检测需要活的技能目录 → 属**插件侧**能力（见 SKILL.md §2.1 的分层表）。
             $rs = @(Get-RelatedSkills $fm)
             if ($rs -contains $name) {
                 [void]$findings.Add((New-Finding 'F2' 'warn' "related_skills 含技能自身（$name）——自依赖无意义" 'SKILL.md' $name))

@@ -16,7 +16,7 @@
 // `dsh --profile web --dump-config` prove the host assembles it.
 
 import { spawn } from 'node:child_process'
-import { cpSync, existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import { cpSync, existsSync, mkdirSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -46,8 +46,8 @@ rmSync(root, { recursive: true, force: true })
 const skillsRoot = join(root, 'skills')
 mkdirSync(join(skillsRoot, 'demo-warn'), { recursive: true })
 mkdirSync(join(skillsRoot, 'demo-bad', 'scripts'), { recursive: true })
-// engine-home：**本机判据引擎真源目录的真实形态**——只有 scripts/、没有 SKILL.md。
-// 它不是技能（dsh 的文件系统 provider 会忽略它），但改动它等于改动判据本身。
+// engine-home：模拟"技能根下一个不含 SKILL.md 的目录"——它不是技能。被写入时插件应升级为
+// 全量审核，而不是拿目录名去 `-Skill`（那会被引擎判 F1「缺少 SKILL.md」）。
 mkdirSync(join(skillsRoot, 'engine-home', 'scripts'), { recursive: true })
 writeFileSync(join(skillsRoot, 'engine-home', 'scripts', 'audit-skills.ps1'), "# engine home\n", 'utf8')
 
@@ -361,6 +361,23 @@ console.log('--- 12) bundled assets integrity ---')
   const bundledMd = readFileSync(join(bundled, 'SKILL.md'), 'utf8')
   check('bundled SKILL.md is the real skill (name matches)', /^name:\s*skill-audit\s*$/m.test(bundledMd))
 
+  // 包内技能**不得引用只存在于作者机器上的技能名**。那些名字进了随包发布的正文，对使用者
+  // 就是一条死引用（他会去找、然后找不到），同时也把作者本机的技能构成暴露了出去。
+  // 放在这里而不是审核扩展里：被检对象是**包内发布物**，它不在技能根下、扩展扫不到；
+  // 而技能根下的本机技能本来就允许互提技能名（有 related_skills 契约），没有可检的东西。
+  // 第三方克隆本仓库时其技能根里没有这些名字，本项自然不产生噪音。
+  const realSkillsRoot = join(process.env.USERPROFILE ?? process.env.HOME ?? '.', '.dsh', 'skills')
+  if (existsSync(realSkillsRoot)) {
+    const localOnly = readdirSync(realSkillsRoot)
+      .filter((n) => n !== 'skill-audit' && existsSync(join(realSkillsRoot, n, 'SKILL.md')))
+    const leaked = localOnly.filter((n) => bundledMd.includes(n))
+    check(
+      'bundled SKILL.md names no local-only skill',
+      leaked.length === 0,
+      leaked.length > 0 ? `泄漏本机技能名：${leaked.join(', ')}` : '',
+    )
+  }
+
   const sample =
     'a "$env:USERPROFILE\\.dsh\\skills\\skill-audit\\scripts\\audit-skills.ps1" b <DSH_HOME>/skills/skill-audit/scripts/audit-skills.ps1 c'
   const rewritten = rewriteEnginePaths(sample, 'E:/x.ps1')
@@ -368,8 +385,8 @@ console.log('--- 12) bundled assets integrity ---')
   check('rewrites the <DSH_HOME> literal', !rewritten.includes('<DSH_HOME>'), rewritten)
   check('replaces every occurrence', (rewritten.match(/E:\/x\.ps1/g) ?? []).length === 2, rewritten)
 
-  // 包内 SKILL.md 现在是核心流程的**唯一原件**（作者本机的技能目录只留引擎、没有 SKILL.md），
-  // 于是本机那套自动审核再也覆盖不到它 —— 唯一还能审它的地方就是这里。
+  // 包内 SKILL.md 是技能正文的**真源**，而它不在任何技能根里——所以本机那套自动审核
+  // 覆盖不到它。唯一还能审它的地方就是这里。
   // 按真实技能布局摆好（目录名必须等于 frontmatter 里的 name），再用真引擎跑一遍全部判据。
   const selfRoot = join(root, 'self-audit-skills')
   mkdirSync(selfRoot, { recursive: true })

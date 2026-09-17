@@ -21,9 +21,9 @@
 //
 // 分层（2026-09-17 定）：**常改的**与**不常改的**分开住，各自只有一个真源。
 //   · 技能正文（边界、触发规则、判据表、豁免与扩展点契约）+ **判据引擎** → 都在**包内**：
-//     正文由运行时注册提供，引擎即包内那份脚本。本机 link 安装时改它们立即生效，但要发版才
-//     对他人生效——**因此不再有"本机真源 vs 包内副本"两份引擎可以分叉**（曾经的真实风险）。
-//   · 机器专属规则 → 本机扩展技能的 audit_extension（改完即生效，永远不必发版）。
+//     正文由运行时注册提供，引擎即包内那份脚本。开发态（把本包 link 进 profile）下改它们
+//     立即生效，但要发版才对他人生效——**因此不再有"包内 vs 技能根"两份引擎可以分叉**。
+//   · 机器专属规则 → **本地**扩展技能的 audit_extension（改完即生效，永远不必发版）。
 // 注意包内引擎与技能正文**在不同时机生效**：引擎是每次审核现读的文件（改完即生效，不必重启），
 // 而技能正文只在插件启动注册时读一次（改完要重启 dsh）。
 // 用户态那一档仍然保留：某台机器若想用自己的引擎（或想覆盖包内判据），放一份在那即可；
@@ -44,8 +44,9 @@ import type {} from '@deepseek-ai/dsh-subprocess'
 export const name = 'tool-skill-audit'
 
 // 'skills' 必须在 inject 里声明，**不能靠"读了再判空"**：cordis 对未在 inject 声明过的
-// 服务属性直接抛错，而不是返回 undefined（2026-09-17 首启崩溃实测：
-// `cannot get property "skills" without inject` → plugin tree failed to load），
+// 服务属性直接抛错，而不是返回 undefined（报错形如
+// `cannot get property "skills" without inject` → `plugin tree failed to load`，
+// 即整个插件装载失败、进程起不来），
 // 于是 registerFallbackSkill 里 `skills === undefined` 的兜底根本到不了。
 // 代价：cordis 4 的 inject 只有**必需**语义（没有 required/optional 之分），本插件会等
 // skills 服务就绪才 apply。本项目里无风险——skills 由 `@deepseek-ai/dsh-base` 提供
@@ -152,9 +153,9 @@ async function fileExists(path: string): Promise<boolean> {
 //   2. 用户态技能 <skillsRoot>/skill-audit/scripts/audit-skills.ps1 —— 可选覆盖位（默认不存在）。
 //   3. 包内 <pkg>/skill/scripts/audit-skills.ps1 —— **真源**，随插件版本发布。
 // 真源为什么在包内（2026-09-17 定位）：引擎与技能正文是同一份发布单元，放进包就**只有一份**，
-// 不会再出现"本机改了、包里还是旧的"这种静默分叉；而"改完即生效"照样成立——本机是 link 安装，
-// 包内那份就在项目目录里。代价是改动要发版才对他人成立；新机引导时插件尚未安装、故 restore
-// 收尾无从审核（sync.ps1 已按此降级为跳过）。三层分工见 skill-audit 技能 §2.0。
+// 不会再出现"改了一处、另一处还是旧的"这种静默分叉；而开发态下"改完即生效"照样成立——把本包
+// link 进 profile 时，包内那份就在项目目录里。代价是改动要发版才对他人成立；新机引导时插件
+// 尚未安装、故 restore 收尾无从审核（同步脚本已按此降级为跳过）。分层见 skill-audit 技能 §2.0。
 
 export type EngineSource = 'config' | 'user-skill' | 'bundled'
 
