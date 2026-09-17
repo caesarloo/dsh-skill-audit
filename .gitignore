@@ -13,3 +13,8 @@ dist/
 Thumbs.db
 .vscode/
 .idea/
+
+# 本机专属泄漏模式（供 scripts/check-leaks.mjs 使用）：含组织名/约定目录名等。
+# 不进版本库——这样扫描器与被扫仓库都不必写出这些词。
+.leak-patterns.local
+
