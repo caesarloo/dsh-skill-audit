@@ -42,8 +42,21 @@ function buildRules() {
     if (pattern) rules.push({ name, re: new RegExp(pattern) })
   }
 
+  // 同一个绝对路径在源码里有三种写法：反斜杠、双反斜杠（JS / TS 字符串转义）、正斜杠。
+  // 只匹配第一种，另外两种会**直接漏过** —— 实测漏过一次：某个公开仓库的测试脚本把一条
+  // 双反斜杠写法的 Windows 绝对路径公开了很久，旧的单反斜杠规则一次都没拦住它。
+  // （这段注释刻意不写出示例路径：写出来本扫描器就会命中自己。）
+  // 路径类规则一律从这里生成。
+  const SEP = '(?:\\\\{1,2}|/)+'
+  const pathVariants = (p) =>
+    p
+      .split(/[\\/]+/)
+      .filter(Boolean)
+      .map(esc)
+      .join(SEP)
+
   if (process.env.USERNAME) add('当前用户名', esc(process.env.USERNAME))
-  if (process.env.USERPROFILE) add('当前家目录', esc(process.env.USERPROFILE))
+  if (process.env.USERPROFILE) add('当前家目录', pathVariants(process.env.USERPROFILE))
   if (process.env.COMPUTERNAME) add('当前计算机名', esc(process.env.COMPUTERNAME))
 
   // 云盘 / 同步根的**实际目录名**（含单位后缀，形如「<厂商> - <单位>」）比只列厂商词更精准：
@@ -58,7 +71,10 @@ function buildRules() {
     if (leaf) add(`同步根目录名（${key}）`, esc(leaf))
   }
 
-  add('家目录式绝对路径', '[A-Za-z]:\\\\Users\\\\(?!me\\\\|<user>|<用户名>)[A-Za-z0-9_.\\-]+')
+  add(
+    '家目录式绝对路径',
+    '[A-Za-z]:' + SEP + 'Users' + SEP + '(?!me|<user>|<用户名>)[A-Za-z0-9_.\\-]+',
+  )
   add('回环地址带端口', '127\\.0\\.0\\.1:\\d+')
   add('内网 IP', '\\b(?:10|172\\.(?:1[6-9]|2\\d|3[01])|192\\.168)\\.\\d{1,3}\\.\\d{1,3}\\b')
   // 厂商词是公开常识、不指向具体机器，保留它可拦住"只写了厂商名而没写后缀"的情况。
@@ -67,7 +83,7 @@ function buildRules() {
   add('云盘 / 中转仓库', VENDORS.join('|'))
   // 规模类计数：会暴露本机资产数量（技能 / 插件 / 仓库各有多少），属于机器事实。
   add('规模类计数', '\\d+\\s*个\\s*(?:技能|插件|仓库)')
-  add('工作区根目录', esc(workspaceRoot))
+  add('工作区根目录', pathVariants(workspaceRoot))
   for (const p of localPatterns) add(`本机专属：${p}`, p)
 
   return rules
