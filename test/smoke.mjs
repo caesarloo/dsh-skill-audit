@@ -16,7 +16,7 @@
 // `dsh --profile web --dump-config` prove the host assembles it.
 
 import { spawn } from 'node:child_process'
-import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import { cpSync, existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
@@ -44,6 +44,10 @@ rmSync(root, { recursive: true, force: true })
 const skillsRoot = join(root, 'skills')
 mkdirSync(join(skillsRoot, 'demo-warn'), { recursive: true })
 mkdirSync(join(skillsRoot, 'demo-bad', 'scripts'), { recursive: true })
+// engine-home：**本机判据引擎真源目录的真实形态**——只有 scripts/、没有 SKILL.md。
+// 它不是技能（dsh 的文件系统 provider 会忽略它），但改动它等于改动判据本身。
+mkdirSync(join(skillsRoot, 'engine-home', 'scripts'), { recursive: true })
+writeFileSync(join(skillsRoot, 'engine-home', 'scripts', 'audit-skills.ps1'), "# engine home\n", 'utf8')
 
 // demo-warn：必填项齐全、但缺 whenToUse/version/last_updated → warn（用于验证"有发现才注入上下文"）
 writeFileSync(
@@ -132,7 +136,7 @@ check(
   planAudit('edit', { file_path: join(skillsRoot, 'demo-bad', 'scripts', 'nobom.ps1') }, skillsRoot)?.skills?.[0] === 'demo-bad',
 )
 // 「整批改写」判据必须与工具名无关：原先按工具名硬匹配，对没装那个备份插件的用户是死逻辑。
-// 用户是死逻辑。下面一律用中性名字，确保这条判据真的是按**调用形态**（mode 参数）而非名字触发的。
+// 下面一律用中性名字，确保这条判据真的是按**调用形态**（mode 参数）而非名字触发的。
 check(
   'any tool with mode:restore → full audit (name-independent)',
   planAudit('some_backup_plugin', { mode: 'restore' }, skillsRoot)?.skills === null,
@@ -155,6 +159,41 @@ check('read-only shell → null', planAudit('pwsh', { command: 'Get-ChildItem C:
 check(
   'shell writing into skills → full audit',
   planAudit('pwsh', { command: 'Set-Content C:\\x\\skills\\a\\SKILL.md x' }, skillsRoot)?.skills === null,
+)
+
+// 分层判定（2026-09-17）：用户态技能目录**只留引擎真源**（没有 SKILL.md），核心流程由包内运行时技能提供。
+// 于是"无 SKILL.md 的目录被改写"= 判据本身变了 → 必须全量重审；
+// 同时它绝不能按目录名送 `-Skill`，否则引擎会对一个不是技能的东西报 `F1 缺少 SKILL.md`（每次改判据都被自己拦下）。
+const engineHome = join(skillsRoot, 'engine-home', 'scripts', 'audit-skills.ps1')
+check(
+  'engine-home (no SKILL.md) edit → full audit, not a scoped F1 failure',
+  planAudit('edit', { file_path: engineHome }, skillsRoot)?.skills === null,
+  JSON.stringify(planAudit('edit', { file_path: engineHome }, skillsRoot)),
+)
+check(
+  'engine-home full-audit scope says so',
+  /全量/.test(planAudit('edit', { file_path: engineHome }, skillsRoot)?.scope ?? ''),
+  planAudit('edit', { file_path: engineHome }, skillsRoot)?.scope,
+)
+check(
+  'a real skill still audits scoped even though engine-home exists',
+  planAudit('edit', { file_path: join(skillsRoot, 'demo-warn', 'SKILL.md') }, skillsRoot)?.skills?.[0] === 'demo-warn',
+)
+check(
+  'mixed hit (skill + non-skill dir) → full audit wins',
+  planAudit(
+    'edit',
+    { file_path: join(skillsRoot, 'demo-warn', 'SKILL.md'), extra: engineHome },
+    skillsRoot,
+  )?.skills === null,
+)
+check(
+  'nonexistent skill dir → conservative full audit (never a bogus -Skill that the engine would reject)',
+  planAudit('write', { file_path: join(skillsRoot, 'brand-new', 'SKILL.md') }, skillsRoot)?.skills === null,
+)
+check(
+  'isSkillDir is injectable (5th arg)',
+  planAudit('edit', { file_path: engineHome }, skillsRoot, [], () => true)?.skills?.[0] === 'engine-home',
 )
 
 console.log('--- 3) parseReport (pure) ---')
@@ -326,6 +365,37 @@ console.log('--- 12) bundled assets integrity ---')
   check('rewrites the $env:USERPROFILE literal', !rewritten.includes('$env:USERPROFILE'), rewritten)
   check('rewrites the <DSH_HOME> literal', !rewritten.includes('<DSH_HOME>'), rewritten)
   check('replaces every occurrence', (rewritten.match(/E:\/x\.ps1/g) ?? []).length === 2, rewritten)
+
+  // 包内 SKILL.md 现在是核心流程的**唯一原件**（作者本机的技能目录只留引擎、没有 SKILL.md），
+  // 于是本机那套自动审核再也覆盖不到它 —— 唯一还能审它的地方就是这里。
+  // 按真实技能布局摆好（目录名必须等于 frontmatter 里的 name），再用真引擎跑一遍全部判据。
+  const selfRoot = join(root, 'self-audit-skills')
+  mkdirSync(selfRoot, { recursive: true })
+  cpSync(bundled, join(selfRoot, 'skill-audit'), { recursive: true })
+  const self = await new Promise((resolvePromise) => {
+    const child = spawn(
+      PS,
+      ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', auditScript, '-SkillsRoot', selfRoot, '-Skill', 'skill-audit', '-Json'],
+      { windowsHide: true },
+    )
+    const out = []
+    const err = []
+    child.stdout.on('data', (d) => out.push(d))
+    child.stderr.on('data', (d) => err.push(d))
+    child.on('close', (code) =>
+      resolvePromise({ code, out: Buffer.concat(out).toString('utf8'), err: Buffer.concat(err).toString('utf8') }),
+    )
+  })
+  const selfReport = parseReport(self.out)
+  check(
+    'bundled SKILL.md passes the real engine with 0 fail',
+    selfReport !== null && selfReport.fail === 0,
+    selfReport ? `fail=${selfReport.fail} ${JSON.stringify(selfReport.results?.[0]?.findings ?? [])}` : self.err || self.out,
+  )
+  check(
+    'bundled skill is discoverable as a skill (its own SKILL.md is present in the mirror)',
+    existsSync(join(selfRoot, 'skill-audit', 'SKILL.md')),
+  )
 }
 
 console.log('--- 13) apply() reports which engine won ---')

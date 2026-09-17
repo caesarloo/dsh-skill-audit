@@ -16,10 +16,16 @@
 //
 // 审核逻辑不在本插件内（单一真源），按优先级三选一：
 //   1) config.auditScript（显式；指定了却不存在 → 直接报错，不静默回落）
-//   2) 用户态技能 <DSH_HOME>/skills/skill-audit/scripts/audit-skills.ps1 —— 规则真源
-//   3) 包内快照   <pkg>/skill/scripts/audit-skills.ps1 —— 回退副本，使"装上插件就能用"
-// 并**仅在用户态技能缺失时**用 ctx.skills.register 注册一份回退技能——层级是
-// project > runtime > user，无条件注册会遮蔽用户态技能本身（硬约束，见 registerFallbackSkill）。
+//   2) 用户态技能 <DSH_HOME>/skills/skill-audit/scripts/audit-skills.ps1 —— 判据真源
+//   3) 包内快照   <pkg>/skill/scripts/audit-skills.ps1 —— 随版本发布的回退副本
+//
+// 分层（2026-09-17 定）：**常改的**与**不常改的**分开住，各自只有一个真源。
+//   · 判据引擎 → 用户态技能目录里的 scripts/audit-skills.ps1（真源，改完即生效，免发版免重启）；
+//   · 机器专属规则 → 本机扩展技能的 audit_extension（同样改完即生效）；
+//   · 核心流程（边界、触发规则、判据表、豁免与扩展点契约）→ 包内技能，由运行时注册提供。
+// 因此本机用户态技能目录**只留引擎真源、没有 SKILL.md**，它不是"技能"，只是引擎的家。
+// 若某台机器保留了**完整的**用户态技能（含 SKILL.md），则尊重它、不注册——层级是
+// project > runtime > user，无条件注册会遮蔽它（硬约束，见 registerFallbackSkill）。
 // 引擎缺失时工具报明确错误、自动触发静默跳过（不打扰正常写文件）。
 
 import { existsSync, readFileSync } from 'node:fs'
@@ -216,12 +222,16 @@ export type FallbackRegistration =
   | 'skipped-no-bundle'
 
 /**
- * 仅在**用户态技能缺失**时注册回退技能。
+ * 注册包内技能——**仅当用户态没有一份完整的同名技能（含 SKILL.md）时**。
+ *
+ * 这条判定就是"核心流程进包、常改内容留本机"的分界线：本机的 `<skillsRoot>/skill-audit/`
+ * 只留 `scripts/audit-skills.ps1`（判据真源，**没有 SKILL.md**），于是判定通过、核心流程由
+ * 包内运行时技能提供；同时 `resolveEngine` 仍优先取用户态那份引擎，判据改动照旧改完即生效。
  *
  * 硬约束：dsh-skill 的 `register()` 层级是 **project > runtime > user**，而
- * `<DSH_HOME>/skills` 属于 user 层 —— 无条件注册一个同名 runtime 技能会**遮蔽用户态技能本身**
- * （2026-09-17 查 dsh-skill 的 `lib/types/index.d.ts` 确认）。对本机而言那等于把天天在改的规则
- * 真源盖掉，是绝不能出的错。故这里先做文件系统判定，存在就一步都不做。
+ * `<DSH_HOME>/skills` 属于 user 层（`source: 'user-dsh'`）——若某台机器上保留了**完整的**
+ * 用户态技能，无条件注册同名 runtime 技能会**遮蔽它**（2026-09-17 查 dsh-skill 的
+ * `lib/types/index.d.ts` 确认）。故这里先做文件系统判定，存在就一步都不做。
  */
 export function registerFallbackSkill(
   ctx: unknown,
@@ -305,6 +315,7 @@ export function planAudit(
   args: unknown,
   skillsRoot: string,
   fullAuditTools: readonly string[] = [],
+  isSkillDir: (dir: string) => boolean = (dir) => existsSync(join(dir, 'SKILL.md')),
 ): Plan | null {
   const lower = toolName.toLowerCase()
   const record = (args ?? {}) as Record<string, unknown>
@@ -336,7 +347,23 @@ export function planAudit(
     if (seg) hits.push(seg)
   }
   if (hits.length === 0) return null
-  const skills = [...new Set(hits)]
+
+  // 命中项分两类。**只有含 SKILL.md 的目录才是技能**，可作为定向审核目标；
+  // skillsRoot 下一旦出现"无 SKILL.md 的目录被改写"，本机语义就是**判据引擎真源被改**
+  // （技能目录只留 scripts/ 而正文由运行时技能提供），此时定向审核无从谈起，
+  // 且引擎变了会波及每一个技能 → 一律升级为**全量重审**，让影响面立刻可见。
+  // 顺带消除一个真误报：若仍按目录名送 `-Skill`，引擎会因该目录无 SKILL.md 报 `F1 缺少 SKILL.md`，
+  // 等于每次改判据都被自己拦下。
+  let nonSkillTouched = false
+  const skills: string[] = []
+  for (const name of [...new Set(hits)]) {
+    if (isSkillDir(join(skillsRoot, name))) skills.push(name)
+    else nonSkillTouched = true
+  }
+  if (nonSkillTouched) {
+    return { skills: null, scope: `${toolName} → 引擎/资产目录改动（非技能目录）→ 全量` }
+  }
+  if (skills.length === 0) return null
   return { skills, scope: `${toolName} → 技能 ${skills.join(', ')}` }
 }
 

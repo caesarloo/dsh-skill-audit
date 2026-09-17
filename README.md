@@ -23,7 +23,7 @@ The audit rules live in the `skill-audit` skill's engine: frontmatter contract (
 dsh plugin --profile web add @caesarloo/dsh-skill-audit
 ```
 
-**No prerequisite** — the package ships a fallback copy of the audit engine *and* of the skill itself, so a bare install is enough. If a `skill-audit` skill already exists in your skills root, the plugin uses that one instead.
+**No prerequisite** — the package ships the audit engine *and* the skill body, so a bare install is enough. If your skills root already holds a full `skill-audit` skill, the plugin leaves it alone and uses that one instead.
 
 Restart dsh afterwards (bundle-level change, not hot-reloaded). Verify:
 
@@ -39,9 +39,19 @@ dsh --profile web --dump-config | Select-String tool-skill-audit
 | 2 | your own skill | `<skillsRoot>/skill-audit/scripts/audit-skills.ps1` | Preferred when present: it is the editable working copy, so a rule change takes effect on the next audit with no rebuild. |
 | 3 | bundled snapshot | `<package>/skill/scripts/audit-skills.ps1` | Fallback that makes a bare install work. |
 
-The plugin registers the `skill-audit` skill at runtime **only when no copy exists in your skills root**. That guard is mandatory rather than polite: DSH ranks `project > runtime > user`, and a skills root is the *user* layer — an unconditional runtime registration would **shadow your own skill**, silently replacing the copy you edit.
+The plugin registers the `skill-audit` skill at runtime **unless your skills root already holds a full copy (i.e. a `SKILL.md`)**. That guard is mandatory rather than polite: DSH ranks `project > runtime > user`, and a skills root is the *user* layer (`source: 'user-dsh'`) — an unconditional runtime registration would **shadow your own skill**.
 
-A registered fallback is given the bundled directory as its resource base, so the relative script paths inside the skill body still resolve.
+The same guard draws the line between stable and evolving content:
+
+| Content | Lives in | Cost of a change |
+|---|---|---|
+| Core flow — boundaries, trigger rules, finding table, waiver & extension contracts | the package (registered at runtime) | rebuild + republish |
+| The audit **engine** — `<skillsRoot>/skill-audit/scripts/audit-skills.ps1` | your skills root, with **no `SKILL.md`**: it is the engine's home, not a skill | none — live on the next audit |
+| **Machine-specific rules** — an `audit_extension` declared by a local skill | your skills root | none — live on the next audit |
+
+So a bare install gets the whole core flow, while everything you actually keep editing stays on your side, editable without a rebuild or a restart.
+
+A registered skill is given the bundled directory as its resource base, so the relative script paths inside the skill body still resolve.
 
 ### Usage
 
@@ -86,18 +96,18 @@ Usually none. To customize, add `config` to the entry in the profile's `cordis.p
 
 ### Dependencies
 
-`@deepseek-ai/dsh-tools`, `@deepseek-ai/dsh-subprocess` and `@deepseek-ai/dsh-llm` are declared as **optional peerDependencies** and provided by the host; the package bundles none of them. This is deliberate: a second copy inside the profile would create two module instances and break tool registration. `dsh-llm` is used only to build the context message — if it is unavailable, the audit still runs and only the context injection is skipped. The skills service (`ctx.skills`) is used through a structural type rather than a package import, so registering the fallback skill introduces no further dependency.
+`@deepseek-ai/dsh-tools`, `@deepseek-ai/dsh-subprocess` and `@deepseek-ai/dsh-llm` are declared as **optional peerDependencies** and provided by the host; the package bundles none of them. This is deliberate: a second copy inside the profile would create two module instances and break tool registration. `dsh-llm` is used only to build the context message — if it is unavailable, the audit still runs and only the context injection is skipped. The skills service (`ctx.skills`) is used through a structural type rather than a package import, so registering the skill introduces no further dependency.
 
 ### Boundaries
 
-- Contains no audit logic itself: it carries a **snapshot** of the engine and relays its output. The editable source of truth stays in the `skill-audit` skill;
+- Contains no audit logic itself: it carries the skill body and the engine as **copies** and relays the engine's output. There are two editable sources of truth — the engine in your skills root, and machine-specific rules in a local skill's `audit_extension`;
 - Does not rewrite tool input and never blocks a tool call;
 - Does not hook non-tool events (`SessionStart` / `Stop`);
 - Does not watch the skills directory — it triggers after tool calls only.
 
 ### Keeping the bundled snapshot in sync (maintainers)
 
-`skill/` is a byte-for-byte snapshot of the author's live `skill-audit` skill. Refresh it before publishing:
+The two halves of `skill/` have **different origins**: `SKILL.md` is *the* source of truth for the core flow (the author's skills root keeps only the engine, with no `SKILL.md`, so the bundled copy is the one original), while `scripts/audit-skills.ps1` is a byte-for-byte copy of the author's live engine and must be refreshed before publishing:
 
 ```sh
 npm run sync-skill
@@ -130,7 +140,7 @@ MIT
 dsh plugin --profile web add @caesarloo/dsh-skill-audit
 ```
 
-**无前置条件** —— 包内自带审核引擎与技能的回退副本，装上即可用。若你的技能根里已经有 `skill-audit` 技能，插件会**优先用你那份**。
+**无前置条件** —— 包内自带审核引擎与技能正文，装上即可用。若你的技能根里已有完整的 `skill-audit` 技能，插件不打扰它、直接用你那份。
 
 装完**重启 dsh**（插件属于 bundle 层变更，不随热重载生效）。验证：
 
@@ -146,9 +156,19 @@ dsh --profile web --dump-config | Select-String tool-skill-audit
 | 2 | 你自己的技能 | `<skillsRoot>/skill-audit/scripts/audit-skills.ps1` | 存在时优先。这是**可编辑的工作副本**：改判据下一次审核即生效，无需重建。 |
 | 3 | 包内快照 | `<package>/skill/scripts/audit-skills.ps1` | 回退副本，保证"装上就能用"。 |
 
-插件**只在你的技能根里没有该技能时**才在运行时注册 `skill-audit`。这个保护是硬性要求而非客气：DSH 的层级是 `project > runtime > user`，而技能根属于 **user 层**——无条件注册会**遮蔽你自己的技能**，把你正在编辑的那份悄悄换掉。
+插件**只在你的技能根里还没有完整副本（即没有 `SKILL.md`）时**才在运行时注册 `skill-audit`。这个保护是硬性要求而非客气：DSH 的层级是 `project > runtime > user`，而技能根属于 **user 层**（`source: 'user-dsh'`）——无条件注册会**遮蔽你自己的技能**。
 
-注册的回退技能以包内目录作为资源基准（resource base），因此技能正文里的相对脚本路径仍然可解析。
+同一条判定也是「稳定」与「常改」的分界线：
+
+| 内容 | 住在哪 | 改一次的代价 |
+|---|---|---|
+| 核心流程——边界、触发规则、判据表、豁免与扩展点契约 | 包内（运行时注册） | 重建 + 重发 |
+| 审核**引擎**——`<skillsRoot>/skill-audit/scripts/audit-skills.ps1` | 你的技能根，**没有 `SKILL.md`**：它是引擎的家，不是技能 | 无——下一次审核即生效 |
+| **机器专属规则**——某个本机技能声明的 `audit_extension` | 你的技能根 | 无——下一次审核即生效 |
+
+所以裸装即可拿到完整核心流程，而你真正会反复改的部分全都留在自己手里，不必重建、不必重启。
+
+注册的技能以包内目录作为资源基准（resource base），因此技能正文里的相对脚本路径仍然可解析。
 
 ### 使用
 
@@ -193,18 +213,18 @@ skill_audit({ skill: 'a,b' })    # 只审指定技能（逗号分隔）
 
 ### 依赖约定
 
-`@deepseek-ai/dsh-tools`、`@deepseek-ai/dsh-subprocess`、`@deepseek-ai/dsh-llm` 声明为 **optional peerDependencies**，由宿主提供，本包不打包。这是刻意的：它们若与主包各装一份会形成两个模块实例，导致工具注册失败。`dsh-llm` 仅用于构造回传消息，缺失时插件降级为「审核照跑、不注入上下文」。技能服务（`ctx.skills`）通过**结构化类型**访问而非 import 包，因此注册回退技能不引入任何新依赖。
+`@deepseek-ai/dsh-tools`、`@deepseek-ai/dsh-subprocess`、`@deepseek-ai/dsh-llm` 声明为 **optional peerDependencies**，由宿主提供，本包不打包。这是刻意的：它们若与主包各装一份会形成两个模块实例，导致工具注册失败。`dsh-llm` 仅用于构造回传消息，缺失时插件降级为「审核照跑、不注入上下文」。技能服务（`ctx.skills`）通过**结构化类型**访问而非 import 包，因此注册技能不引入任何新依赖。
 
 ### 边界（明确不做）
 
-- 本身不含审核逻辑：它携带引擎与技能的**快照**并回传其输出；可编辑的真源始终在 `skill-audit` 技能里；
+- 本身不含审核逻辑：它携带技能正文与引擎的**副本**并回传其输出；可编辑的真源有两处——判据引擎在你的技能根，机器专属规则在本机技能的 `audit_extension`；
 - 不改写工具输入、不阻塞工具调用；
 - 不覆盖 `SessionStart` / `Stop` 等非工具事件；
 - 不监视技能目录的文件变化（只在工具调用后触发）。
 
 ### 维护内置快照（插件作者）
 
-`skill/` 是作者本机 `skill-audit` 技能的逐字节快照。发布前刷新：
+`skill/` 里两部分的来源**不同**：`SKILL.md` 是**核心流程的真源**（作者本机的技能目录只留引擎、没有 SKILL.md，所以包内这份就是唯一原件）；`scripts/audit-skills.ps1` 是作者本机引擎的逐字节副本，发布前需刷新：
 
 ```sh
 npm run sync-skill
