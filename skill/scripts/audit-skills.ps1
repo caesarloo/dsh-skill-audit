@@ -16,6 +16,8 @@
       R2  脚本被引用：技能内脚本未被 SKILL.md 提及                       → info
       F2  依赖声明：related_skills 的自依赖 / 重复项（**存在性不在此判定**：技能名可由
           插件运行时注册、磁盘无 SKILL.md，静态检查必误报 → 归插件侧）        → warn
+      E1  审核扩展：audit_extension 声明的扩展缺失 / 无 BOM / 解析失败 / 抛错 → 记在
+          声明者身上且只报一次（坏扩展立即停用）                            → warn
       M1  豁免标记契约：audit:ignore 标记缺代码或理由不足 8 字符         → warn
       X1  敏感信息：口令 / token / 私钥特征串                          → fail
       X2  机器专属硬编码路径（C:\Users\<具体用户名>）                   → info
@@ -198,8 +200,8 @@ function Get-RelatedSkills {
 }
 
 function New-Finding {
-    param([string]$Code, [string]$Level, [string]$Message, [string]$File, [string]$Target = '')
-    return [pscustomobject]@{ code = $Code; level = $Level; message = $Message; file = $File; target = $Target }
+    param([string]$Code, [string]$Level, [string]$Message, [string]$File, [string]$Target = '', [string]$Source = '')
+    return [pscustomobject]@{ code = $Code; level = $Level; message = $Message; file = $File; target = $Target; source = $Source }
 }
 
 # —— 例外豁免（audit:ignore 标记）——
@@ -243,7 +245,7 @@ function Test-Waived {
 }
 
 function Invoke-SkillAudit {
-    param([string]$SkillDir)
+    param([string]$SkillDir, $Extensions = @(), $ExtErrors = @{}, $ExtRuntime = @{})
 
     $name = Split-Path $SkillDir -Leaf
     $findings = New-Object System.Collections.ArrayList
@@ -390,6 +392,33 @@ function Invoke-SkillAudit {
         [void]$findings.Add((New-Finding 'X3' 'info' "含危险命令模式（确认用途）：$h" '' ($h -split ' @ ')[-1]))
     }
 
+    # —— 扩展点：由本地其他技能补充审核（只增不减，见文件头 Get-SkillAuditExtensions 的说明）——
+    foreach ($msg in @($ExtErrors[$name])) {
+        if ($msg) { [void]$findings.Add((New-Finding 'E1' 'warn' "审核扩展不可用：$msg" 'SKILL.md')) }
+    }
+    foreach ($e in @($Extensions)) {
+        # 已经抛过错的扩展直接停用：同一个坏扩展会作用于**每个**被审技能，逐技能报错会瞬间
+        # 淹没报告（2026-09-17 探针实测：一个抛错的扩展让 5 个技能各多出一条 E1）。
+        if ($ExtRuntime.ContainsKey($e.owner)) { continue }
+        try {
+            foreach ($x in @(Invoke-SkillAuditExtension -Ext $e -SkillName $name -SkillDir $SkillDir -Root $SkillsRoot)) {
+                if ($null -eq $x -or -not $x.code) { continue }
+                # 级别白名单：扩展不能自造级别（未知值降级为 warn），避免绕过 status 的判定。
+                $lvl = if (@('fail', 'warn', 'info') -contains $x.level) { $x.level } else { 'warn' }
+                [void]$findings.Add((New-Finding $x.code $lvl $x.message `
+                    $(if ($x.file) { $x.file } else { 'SKILL.md' }) `
+                    $(if ($x.target) { $x.target } else { '' }) `
+                    $e.owner))
+            }
+        }
+        catch {
+            # 错误归**声明扩展的那个技能**（谁写的扩展谁修），并带上触发时的被审技能名便于定位。
+            # 这里只登记，落地成 E1 由主流程在 owner 的结果上补齐——因为按审核顺序 owner 可能**还没轮到**；
+            # 顺手也就实现了"只报一次"。
+            $ExtRuntime[$e.owner] = "在审核 $name 时抛错：$($_.Exception.Message)"
+        }
+    }
+
     # —— 应用 audit:ignore 例外（判据不放宽，只跳过被显式声明为不适用的条目）——
     if (@($waivers).Count -gt 0) {
         $survivors = @($findings | Where-Object { -not (Test-Waived $_ $waivers) })
@@ -412,6 +441,47 @@ function Invoke-SkillAudit {
     }
 }
 
+# —— 扩展点：由**本地其他技能**补充审核（audit_extension）——
+#
+# 声明方式（写在**提供扩展的那个技能**的 frontmatter 里）：
+#   metadata:
+#     hermes:
+#       audit_extension: "scripts/audit-checks.ps1"    # 相对该技能目录
+# 契约：扩展脚本定义 Get-SkillAuditFindings，返回 finding 对象数组（code/level/message/file/target）。
+#
+# 三条设计约束：
+#   ① **只增不减**：扩展只能追加发现，不能移除或降级核心判据——核心判据的真源始终是本脚本。
+#      故扩展点不破坏"判据单一真源"，它只是让**新**判据各有各的家。
+#   ② **出错不拖垮审核**：扩展缺失 / 无 BOM / 解析失败 / 执行抛错 → 记一条 E1 warn 到**声明它的
+#      技能**上，审核继续跑完。扩展是本地可信代码，但审核本身绝不能因它而失败。
+#   ③ **零影响**：没有任何技能声明 audit_extension 时，本机制完全不参与，行为与引入前一致。
+function Get-SkillAuditExtensions {
+    param([string]$Root)
+    $list = @()
+    foreach ($d in @(Get-ChildItem -LiteralPath $Root -Directory -ErrorAction SilentlyContinue)) {
+        $md = Join-Path $d.FullName 'SKILL.md'
+        if (-not (Test-Path -LiteralPath $md)) { continue }
+        $fm = Get-FrontmatterText ([System.IO.File]::ReadAllText($md))
+        if (-not $fm) { continue }
+        $m = [regex]::Match($fm, '(?m)^\s*audit_extension\s*:\s*(.+?)\s*$')
+        if (-not $m.Success) { continue }
+        $rel = $m.Groups[1].Value.Trim().Trim('"').Trim("'")
+        $list += [pscustomobject]@{ owner = $d.Name; path = (Join-Path $d.FullName $rel) }
+    }
+    return @($list)
+}
+
+# dot-source 到**独立函数作用域**再调用：直接 . 进引擎作用域会让扩展脚本覆盖引擎自己的变量
+# （$findings / $text / $SkillsRoot …），也会把它的函数定义泄漏到全局。
+function Invoke-SkillAuditExtension {
+    param($Ext, [string]$SkillName, [string]$SkillDir, [string]$Root)
+    . $Ext.path
+    if (-not (Get-Command 'Get-SkillAuditFindings' -ErrorAction SilentlyContinue)) {
+        throw "扩展脚本未定义 Get-SkillAuditFindings：$($Ext.path)"
+    }
+    return @(Get-SkillAuditFindings -SkillName $SkillName -SkillDir $SkillDir -SkillsRoot $Root)
+}
+
 # —— 主流程 ————————————————————————————————————————————————
 
 $targets = @()
@@ -428,8 +498,53 @@ else {
         Select-Object -ExpandProperty FullName | Sort-Object)
 }
 
+# 扩展发现必须在审任何技能**之前**完成：扩展可能声明在本次范围之外的技能上（定向审核时尤其如此）。
+$extensions = @()
+$extErrors = @{}
+foreach ($e in (Get-SkillAuditExtensions $SkillsRoot)) {
+    $why = $null
+    if (-not (Test-Path -LiteralPath $e.path)) {
+        $why = "声明了 audit_extension 但文件不存在：$($e.path)"
+    }
+    elseif (-not (Test-Utf8Bom $e.path)) {
+        $why = "扩展脚本缺少 UTF-8 BOM（5.1 下中文会按 GBK 解码而解析失败）：$($e.path)"
+    }
+    elseif ((Test-PsParse $e.path) -gt 0) {
+        $why = "扩展脚本解析失败（$(Test-PsParse $e.path) 个错误）：$($e.path)"
+    }
+    if ($why) {
+        if (-not $extErrors.ContainsKey($e.owner)) { $extErrors[$e.owner] = @() }
+        $extErrors[$e.owner] += $why
+    }
+    else { $extensions += $e }
+}
+
+$ExtRuntime = @{}
 $results = @()
-foreach ($t in $targets) { $results += (Invoke-SkillAudit $t) }
+foreach ($t in $targets) {
+    $results += (Invoke-SkillAudit $t -Extensions $extensions -ExtErrors $extErrors -ExtRuntime $ExtRuntime)
+}
+
+# 扩展运行时错误统一补到**声明它的技能**上（原因见 Invoke-SkillAudit 内的说明）：
+# 结果对象里的 findings 是定长数组，故这里重建对象并同步重算 status/fails/warns。
+if ($ExtRuntime.Count -gt 0) {
+    $results = @($results | ForEach-Object {
+        $r = $_
+        if (-not $ExtRuntime.ContainsKey($r.skill)) { return $r }
+        $extra = @([pscustomobject]@{
+            code = 'E1'; level = 'warn'; message = "审核扩展执行失败：$($ExtRuntime[$r.skill])"
+            file = 'SKILL.md'; target = ''; source = ''
+        })
+        $all = @($r.findings) + $extra
+        $f = @($all | Where-Object { $_.level -eq 'fail' }).Count
+        $w = @($all | Where-Object { $_.level -eq 'warn' }).Count
+        [pscustomobject]@{
+            skill = $r.skill
+            status = $(if ($f -gt 0) { 'fail' } elseif ($w -gt 0) { 'warn' } else { 'pass' })
+            fails = $f; warns = $w; scripts = $r.scripts; findings = $all
+        }
+    })
+}
 
 $failTotal = @($results | Where-Object { $_.status -eq 'fail' }).Count
 $warnTotal = @($results | Where-Object { $_.status -eq 'warn' }).Count
@@ -444,6 +559,7 @@ if (-not $NoLog) {
             skillsRoot = $SkillsRoot
             fail = $failTotal
             warn = $warnTotal
+            extensions = @($extensions | ForEach-Object { [pscustomobject]@{ owner = $_.owner; path = $_.path } })
             results = $results
         }
         # 局部变量不能叫 $json —— PowerShell 变量名不区分大小写，会撞上本脚本的 [switch]$Json 参数，
@@ -459,18 +575,19 @@ if (-not $NoLog) {
 }
 
 if ($Json) {
-    $out = [pscustomobject]@{ auditedAt = (Get-Date).ToString('s'); skillsRoot = $SkillsRoot; fail = $failTotal; warn = $warnTotal; results = $results }
+    $out = [pscustomobject]@{ auditedAt = (Get-Date).ToString('s'); skillsRoot = $SkillsRoot; fail = $failTotal; warn = $warnTotal; extensions = @($extensions | ForEach-Object { $_.owner }); results = $results }
     $out | ConvertTo-Json -Depth 8
 }
 else {
     Write-Host "==== 技能审核：$SkillsRoot ===="
-    Write-Host ("技能数 {0}  |  fail {1}  |  warn {2}" -f $results.Count, $failTotal, $warnTotal)
+    Write-Host ("技能数 {0}  |  fail {1}  |  warn {2}{3}" -f $results.Count, $failTotal, $warnTotal,
+        $(if ($extensions.Count -gt 0) { "  |  审核扩展 $($extensions.Count) 个：$(($extensions | ForEach-Object { $_.owner }) -join '、')" } else { '' }))
     foreach ($r in $results) {
         $mark = switch ($r.status) { 'pass' { '[通过]' } 'warn' { '[注意]' } default { '[失败]' } }
         Write-Host ("`n$mark {0}  (脚本 {1} 个, fail {2}, warn {3})" -f $r.skill, $r.scripts, $r.fails, $r.warns)
         foreach ($f in $r.findings) {
             if ($f.level -eq 'info') { continue }
-            Write-Host ("    - [{0}] {1} ({2})" -f $f.level, $f.message, $f.code)
+            Write-Host ("    - [{0}] {1} ({2}{3})" -f $f.level, $f.message, $f.code, $(if ($f.source) { " @$($f.source)" } else { '' }))
         }
     }
     if ($failTotal -gt 0) { Write-Host "`n存在 fail 项：按上面的 SKILL.md/脚本路径修复后重跑本脚本。" }

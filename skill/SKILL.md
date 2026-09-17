@@ -101,12 +101,45 @@ powershell -NoProfile -ExecutionPolicy Bypass -File "$env:USERPROFILE\.dsh\skill
 | R1 | 引用完整性 | fail/warn | SKILL.md 里 `scripts/xxx.ps1` 这类相对引用必须真实存在。**子目录存在而文件缺失 → fail**（真断裂）；**引用落在同根下的另一个技能里 → warn「跨技能引用」**（应改为点名技能名 + `related_skills`，见 §5.1）；**连子目录都没有 → warn**（运行时生成或外部来源） |
 | R2 | 脚本被引用 | info | 技能内脚本未被 SKILL.md 提及（可能是死资产，也可能是刻意留的工具） |
 | F2 | 依赖声明 | warn | `metadata.hermes.related_skills` 的**自依赖 / 重复项**。**存在性刻意不查**：技能名可由插件运行时注册（磁盘无 SKILL.md），静态脚本查不到 → 查了必误报（2026-09-17 实测）。悬空声明检测需活的技能目录，属插件侧（§2.0） |
+| E1 | 审核扩展 | warn | `audit_extension` 声明的扩展缺失 / 无 BOM / 解析失败 / 执行抛错 → 记在**声明该扩展的技能**上；抛过错的扩展立即停用且只报一次（见 §4.1） |
 | M1 | 豁免标记契约 | warn | `audit:ignore` 标记缺代码、或理由不足 8 字符 → 标记不生效并报 M1（防止"随手加个标记消音"） |
 | X1 | 敏感信息 | fail | 命中 OpenAI/GitHub/npm/AWS 特征串、私钥块、明文口令或 token 赋值 |
 | X2 | 机器专属路径 | info | 硬编码 `C:\Users\<具体用户名>`（通用写法 `$env:USERPROFILE`/`%TEMP%` 不算） |
 | X3 | 危险命令 | info | 递归强删、`rm -rf`、`reg delete`、格式化等模式（确认用途，常见于快照清理） |
 
 **为什么 X2/X3 只记 info**：本机技能按约定会写自己的绝对路径（钩子、快照目录），危险命令也确有正当用途（清理恢复快照）。把它们当 fail 会让审核天天报警，最后被无视——**审核一旦有噪音就会失去意义**。
+
+### 4.1 扩展点：由本地其他技能补充审核（`audit_extension`）
+
+核心判据的真源永远是本技能的 `scripts/audit-skills.ps1`；但**本地其他技能可以追加自己的检查**，用来承载领域专属规则（例：某技能要求正文必须维护版本历史表）。声明写在**提供扩展的那个技能**的 frontmatter 里，脚本路径相对该技能目录：
+
+```yaml
+metadata:
+  hermes:
+    audit_extension: "scripts/<扩展脚本名>.ps1"
+```
+
+扩展脚本需定义 `Get-SkillAuditFindings`，引擎会对**每个被审技能**调用它一次：
+
+```powershell
+function Get-SkillAuditFindings {
+    param([string]$SkillName, [string]$SkillDir, [string]$SkillsRoot)
+    if ($SkillName -ne 'my-skill') { return @() }
+    return @([pscustomobject]@{
+        code = 'MY1'; level = 'warn'
+        message = '自定义检查未通过'
+        file = 'SKILL.md'; target = 'my-skill'
+    })
+}
+```
+
+三条硬约束（均经探针实测）：
+
+1. **只增不减**：扩展只能追加发现，不能移除或降级核心判据——「判据单一真源」不因扩展点而松动，新判据各有各的家。
+2. **出错不拖垮审核**：缺文件 / 无 BOM / 解析失败 / 执行抛错 → 记一条 `E1` warn 到**声明它的技能**上，审核照常跑完；抛过错的扩展会被**立即停用且只报一次**（否则一个坏扩展会作用于每个被审技能，把报告刷爆——2026-09-17 探针实测：5 个技能各多一条 E1）。
+3. **零影响**：没有任何技能声明 `audit_extension` 时本机制完全不参与，行为与引入前一致。
+
+扩展返回的 `level` 只认 `fail` / `warn` / `info`，其它值降级为 `warn`——不允许自造级别绕过 status 判定。扩展产物照常参与豁免（形式与理由要求见 §5.1）。审核输出会标出来源（形如 `MY1 @my-skill`），表头列出本次加载的扩展，JSON 报告含 `extensions` 字段。
 
 ## 五、处置流程
 
