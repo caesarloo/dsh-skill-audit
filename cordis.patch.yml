@@ -1,0 +1,6 @@
+# dsh-skill-audit bundle layer — applied when a profile lists this bundle.
+# `name` is resolved through the profile's node_modules (or $DSH_HOME/profiles/node_modules),
+# NOT a relative path.
+- insert:
+    - id: tool-skill-audit
+      name: '@caesarloo/dsh-skill-audit'
