@@ -435,9 +435,9 @@ export function apply(ctx: Context, config: SkillAuditConfig = {}): void {
   /**
    * 构造回传上下文；只有存在需要行动的问题时才返回消息。
    *
-   * `failsOnly` 用于**全量场景**（restore/backup、shell 批量改写）：那里 warn 的绝对数量很大
-   * （本机 11 个技能里 9 个各有 1~3 条元数据类 warn），逐条列出会把上下文挤爆且失去焦点 ——
-   * 全量时只详列 fail，warn 压成一行汇总；定向单技能时（通常 1~3 条）才 fail+warn 都列。
+   * `failsOnly` 用于**全量场景**（restore/backup、shell 批量改写）：那里 warn 的绝对数量很大，
+   * 逐条列出会把上下文挤爆且失去焦点 —— 全量时只详列 fail，warn 压成一行汇总；
+   * 定向单技能时（通常只有个位数条）才 fail + warn 都列。
    * 全量且**只有 warn**时直接返回 undefined：那属于背景噪音，不该打断任何一次写入。
    */
   async function buildContextMessage(

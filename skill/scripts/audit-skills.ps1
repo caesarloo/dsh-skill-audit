@@ -398,7 +398,7 @@ function Invoke-SkillAudit {
     }
     foreach ($e in @($Extensions)) {
         # 已经抛过错的扩展直接停用：同一个坏扩展会作用于**每个**被审技能，逐技能报错会瞬间
-        # 淹没报告（2026-09-17 探针实测：一个抛错的扩展让 5 个技能各多出一条 E1）。
+        # 淹没报告（2026-09-17 探针实测：一个抛错的扩展会让每个被审技能各多出一条 E1）。
         if ($ExtRuntime.ContainsKey($e.owner)) { continue }
         try {
             foreach ($x in @(Invoke-SkillAuditExtension -Ext $e -SkillName $name -SkillDir $SkillDir -Root $SkillsRoot)) {

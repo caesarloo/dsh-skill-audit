@@ -50,10 +50,10 @@ metadata:
 
 - **触发规则**：**写入类文件工具**（`write`/`edit`/`multi_edit`/`notebook_edit`/`apply_patch` …）命中 `<DSH_HOME>/skills/<技能>/` → 只审该技能；`dsh_config_git_backup` 的 `restore`/`backup` → 全量；`pwsh` 等 shell 的命令行同时含 `skills` 与写操作迹象（`Set-Content`/`Copy-Item`/`Remove-Item`/`robocopy` …）→ 全量；其它 → 静默。**只读工具（`read`/`glob`/`grep`）刻意不触发**——它们同样携带 `file_path` 却不改内容；不加这条白名单，每读一次技能文件就会注入一次审核上下文（2026-09-17 实测后收紧）。
 - **审的是新内容**：在 `post-execute`（**写入之后**）执行——对比 `pre-execute` 只能审到旧文件（第三方 `dsh-skill-authoring` 的 pre-execute + 跳过 edit 就是这个缺陷）。
-- **上下文分级**：定向单技能（`write`/`edit`）详列 fail + warn；**全量场景**（restore/backup、shell 批量改写）只详列 fail、warn 压成一行汇总（warn 多时逐条列会把上下文挤爆——2026-09-17 曾一次出现 15 条、分布于 9 个技能）；**全量且只有 warn 时完全不注入**（背景噪音不打断写入）；全部通过同样保持安静，只写 `~/.dsh/vet/skill-audits/latest.json`（时间戳档保留 40 份）。
+- **上下文分级**：定向单技能（`write`/`edit`）详列 fail + warn；**全量场景**（restore/backup、shell 批量改写）只详列 fail、warn 压成一行汇总（warn 多时逐条列会把上下文挤爆）；**全量且只有 warn 时完全不注入**（背景噪音不打断写入）；全部通过同样保持安静，只写 `~/.dsh/vet/skill-audits/latest.json`（时间戳档保留 40 份）。
 - **不阻塞**：任何异常都被吞掉并委托 `next()`，绝不影响工具调用本身。
 - **主动调用**：`skill_audit` 工具（不带参数 = 全量；`skill: 'a,b'` = 定向）。
-- **源码 / 安装**：独立项目 `{workspace}\dsh-skill-audit`（npm 包 `@caesarloo/dsh-skill-audit`，自建 git 仓库、**不进 dsh 同步面**）；安装 = `dsh plugin --profile web add @caesarloo/dsh-skill-audit`（本机开发用 `add {workspace}\dsh-skill-audit` 走 link）。
+- **源码 / 安装**：独立项目 `dsh-skill-audit`（npm 包 `@caesarloo/dsh-skill-audit`，自建 git 仓库、**不进 dsh 同步面**）；安装 = `dsh plugin --profile web add @caesarloo/dsh-skill-audit`（开发时用 `add <项目目录>` 走 link）。
 - **引擎单一真源**：插件不含审核规则，只负责"触发 + 回传"；规则始终在本技能的 `scripts/audit-skills.ps1`。
 - **必须重启 dsh 的三种情形**：① 装新 bundle（含本插件首次安装）；② 改 `cordis.patch.yml` 的 `insert` —— `patchReload: live` **不会**把新增条目应用到运行中的进程（2026-09-17 实测：改完 patch 等 10 秒再改技能，钩子依旧未被调用）；③ **改插件源码并重建 `dist/`** —— HMR 不监视 link 项目的 `dist/`（2026-09-17 实测：改完重建、进程仍走旧逻辑，`read` 依旧触发审核）。
 
@@ -61,7 +61,7 @@ metadata:
 
 ### 2.2 副通道：`sync.ps1` 的 restore 挂点（覆盖"从 dsh 恢复"）
 
-`{workspace}\dsh\sync.ps1` 在 restore 成功收尾时直接调用 `audit-skills.ps1`（`if ($Mode -eq 'restore' -and -not $DryRun)` 段），覆盖**插件看不到的场景**：不经 dsh 的手工/脚本 restore、以及 `install.ps1` 的新机引导（那时插件通常还没装）。它不改变 sync.ps1 的退出码——还原已经成功，fail 项属于后续修复项。
+备份仓库里的 `sync.ps1` 在 restore 成功收尾时直接调用 `audit-skills.ps1`（`if ($Mode -eq 'restore' -and -not $DryRun)` 段），覆盖**插件看不到的场景**：不经 dsh 的手工/脚本 restore、以及 `install.ps1` 的新机引导（那时插件通常还没装）。它不改变 sync.ps1 的退出码——还原已经成功，fail 项属于后续修复项。
 
 ## 三、手工通道（agent 执行）
 
@@ -87,7 +87,7 @@ powershell -NoProfile -ExecutionPolicy Bypass -File "$env:USERPROFILE\.dsh\skill
 深度审核做完后，把结论落成档案（仓库自有资产，随 git 传播）：
 
 ```
-{workspace}\dsh\vet\skill-audits\<技能名>-<yyyyMMdd-HHmmss>.md
+<备份仓库>\vet\skill-audits\<技能名>-<yyyyMMdd-HHmmss>.md
 ```
 
 档案内容：审核时间、静态结论、人工核对的语义项、结论（可用 / 需修 / 建议重写）、遗留风险。
@@ -136,7 +136,7 @@ function Get-SkillAuditFindings {
 三条硬约束（均经探针实测）：
 
 1. **只增不减**：扩展只能追加发现，不能移除或降级核心判据——「判据单一真源」不因扩展点而松动，新判据各有各的家。
-2. **出错不拖垮审核**：缺文件 / 无 BOM / 解析失败 / 执行抛错 → 记一条 `E1` warn 到**声明它的技能**上，审核照常跑完；抛过错的扩展会被**立即停用且只报一次**（否则一个坏扩展会作用于每个被审技能，把报告刷爆——2026-09-17 探针实测：5 个技能各多一条 E1）。
+2. **出错不拖垮审核**：缺文件 / 无 BOM / 解析失败 / 执行抛错 → 记一条 `E1` warn 到**声明它的技能**上，审核照常跑完；抛过错的扩展会被**立即停用且只报一次**（否则一个坏扩展会作用于每个被审技能，把报告刷爆——2026-09-17 探针实测）。
 3. **零影响**：没有任何技能声明 `audit_extension` 时本机制完全不参与，行为与引入前一致。
 
 扩展返回的 `level` 只认 `fail` / `warn` / `info`，其它值降级为 `warn`——不允许自造级别绕过 status 判定。扩展产物照常参与豁免（形式与理由要求见 §5.1）。审核输出会标出来源（形如 `MY1 @my-skill`），表头列出本次加载的扩展，JSON 报告含 `extensions` 字段。
@@ -183,7 +183,7 @@ R1 的 warn 分支针对的是"引用了**不属于本技能**、或**尚未生�
 
 两个脚本都必须带 UTF-8 BOM（由 `powershell` 5.1 执行且含中文）。审核引擎另在开头把 `[Console]::OutputEncoding` 设为 UTF-8——否则 5.1 按控制台代码页（GBK）写 stdout，插件侧 Node 按 UTF-8 解码就是乱码（2026-09-17 实测踩坑）。
 
-自动触发的**实现**不在本技能目录里（避免与 dsh 同步面耦合）：它是独立项目 `{workspace}\dsh-skill-audit`（npm `@caesarloo/dsh-skill-audit`），含源码、冒烟测试与 README。
+自动触发的**实现**不在本技能目录里（避免与 dsh 同步面耦合）：它是独立项目 `dsh-skill-audit`（npm `@caesarloo/dsh-skill-audit`），含源码、冒烟测试与 README。
 
 ## 七、故障排查
 
