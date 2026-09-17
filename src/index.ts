@@ -14,12 +14,18 @@
 //        · pwsh 等 shell，命令行同时含 skills 与写操作迹象 → 全量
 //   2) `skill_audit` 工具 —— agent 可主动定向或全量审核。
 //
-// 审核逻辑不在本插件内（单一真源）：默认调用
-//   <DSH_HOME>/skills/skill-audit/scripts/audit-skills.ps1
-// 该脚本缺失时工具报明确错误、自动触发静默跳过（不打扰正常写文件）。
+// 审核逻辑不在本插件内（单一真源），按优先级三选一：
+//   1) config.auditScript（显式；指定了却不存在 → 直接报错，不静默回落）
+//   2) 用户态技能 <DSH_HOME>/skills/skill-audit/scripts/audit-skills.ps1 —— 规则真源
+//   3) 包内快照   <pkg>/skill/scripts/audit-skills.ps1 —— 回退副本，使"装上插件就能用"
+// 并**仅在用户态技能缺失时**用 ctx.skills.register 注册一份回退技能——层级是
+// project > runtime > user，无条件注册会遮蔽用户态技能本身（硬约束，见 registerFallbackSkill）。
+// 引擎缺失时工具报明确错误、自动触发静默跳过（不打扰正常写文件）。
 
+import { existsSync, readFileSync } from 'node:fs'
 import { stat } from 'node:fs/promises'
-import { isAbsolute, join, resolve as resolvePath } from 'node:path'
+import { dirname, isAbsolute, join, resolve as resolvePath } from 'node:path'
+import { fileURLToPath } from 'node:url'
 import type { Context } from '@deepseek-ai/cordis'
 import { defineTool } from '@deepseek-ai/dsh-tools'
 // 类型侧引入 subprocess 服务声明（扩展 Context.subprocess 类型；编译时擦除）
@@ -29,6 +35,10 @@ import type {} from '@deepseek-ai/dsh-subprocess'
 export const name = 'tool-skill-audit'
 
 export const inject = ['tools', 'subprocess']
+
+const SKILL_NAME = 'skill-audit'
+const ENGINE_RELATIVE = join('scripts', 'audit-skills.ps1')
+const BUNDLED_SKILL_DIRNAME = 'skill'
 
 const POWERSHELL =
   process.platform === 'win32'
@@ -42,7 +52,10 @@ const DEFAULT_TIMEOUT_MS = 120000
 const DEFAULT_MAX_CONTEXT_CHARS = 2000
 
 export interface SkillAuditConfig {
-  /** 审核脚本路径；缺省 <DSH_HOME>/skills/skill-audit/scripts/audit-skills.ps1。 */
+  /**
+   * 审核脚本路径。**显式指定且不存在时报错，不静默回落**。
+   * 缺省按 用户态技能 → 包内快照 的顺序自动解析（见 resolveEngine）。
+   */
   auditScript?: string
   /** 技能根目录；缺省 <DSH_HOME>/skills。 */
   skillsRoot?: string
@@ -104,6 +117,130 @@ async function fileExists(path: string): Promise<boolean> {
   } catch {
     return false
   }
+}
+
+// —— 引擎与技能的定位（插件自带回退副本，使"装了就能用"）——
+//
+// 引擎三个来源，优先级从高到低：
+//   1. config.auditScript —— 显式指定。**指定了却不存在则不静默回落**：显式意图优先于便利，
+//      悄悄换一个引擎跑会让"我明明指了路径"变成难以察觉的错。
+//   2. 用户态技能 <skillsRoot>/skill-audit/scripts/audit-skills.ps1 —— 规则真源，改完即生效。
+//   3. 包内快照 <pkg>/skill/scripts/audit-skills.ps1 —— 随插件版本发布的回退副本。
+// 为什么真源留在用户态而不搬进包：sync.ps1 的 restore 收尾与 AGENTS.md 的手工兜底命令都按
+// **普通文件路径**调用它，而那时插件可能还没装（新机引导）；且用户态改判据立即生效、不必重建
+// 重发重启。三层分工见 skill-audit 技能 §2.0。
+
+export type EngineSource = 'config' | 'user-skill' | 'bundled'
+
+export interface ResolvedEngine {
+  path: string
+  source: EngineSource
+}
+
+export interface ResolveEngineOptions {
+  configured?: string
+  skillsRoot: string
+  bundledSkillDir?: string | null
+  /** 供测试注入的"是不是文件"判定；缺省用 existsSync。 */
+  isFile?: (path: string) => boolean
+}
+
+export function resolveEngine(options: ResolveEngineOptions): ResolvedEngine | null {
+  const isFile = options.isFile ?? ((p: string) => existsSync(p))
+  if (options.configured) {
+    return isFile(options.configured) ? { path: options.configured, source: 'config' } : null
+  }
+  const userEngine = join(options.skillsRoot, SKILL_NAME, ENGINE_RELATIVE)
+  if (isFile(userEngine)) return { path: userEngine, source: 'user-skill' }
+  if (options.bundledSkillDir) {
+    const bundled = join(options.bundledSkillDir, ENGINE_RELATIVE)
+    if (isFile(bundled)) return { path: bundled, source: 'bundled' }
+  }
+  return null
+}
+
+/** 包内 skill/ 快照目录：从本模块向上找含 skill/SKILL.md 的目录（逐文件 dist/ 与打包形态都可定位）。 */
+export function resolveBundledSkillDir(startUrl: string = import.meta.url): string | null {
+  let dir = dirname(fileURLToPath(startUrl))
+  for (let depth = 0; depth < 6; depth++) {
+    const candidate = join(dir, BUNDLED_SKILL_DIRNAME)
+    if (existsSync(join(candidate, 'SKILL.md'))) return candidate
+    const parent = dirname(dir)
+    if (parent === dir) break
+    dir = parent
+  }
+  return null
+}
+
+/** 极简 frontmatter 取值（只认单行 `key: value`，够用且不为此引 YAML 依赖）。 */
+function frontmatterField(content: string, key: string): string | undefined {
+  // 注意：行内标志 (?m) 是 .NET/PCRE 写法，JS 的 RegExp 会抛 "Invalid group" —— 多行标志必须走第二参数。
+  const match = content.match(new RegExp(`^${key}\\s*:\\s*(.+?)\\s*$`, 'm'))
+  if (!match) return undefined
+  return match[1].replace(/^["']|["']$/g, '')
+}
+
+/**
+ * 把回退技能正文里的"用户态引擎路径"改写成实际生效的路径。
+ * 只替换**精确字面量**：真源改了措辞就自然不再匹配，不会误伤别的路径。
+ */
+export function rewriteEnginePaths(content: string, enginePath: string): string {
+  return content
+    .replace(/\$env:USERPROFILE\\\.dsh\\skills\\skill-audit\\scripts\\audit-skills\.ps1/g, enginePath)
+    .replace(/<DSH_HOME>[\\/]skills[\\/]skill-audit[\\/]scripts[\\/]audit-skills\.ps1/g, enginePath)
+}
+
+/** dsh-skill 的技能注册服务（结构化声明，避免为一行调用引入新的包依赖）。 */
+interface SkillServiceLike {
+  register(skill: {
+    name: string
+    description: string
+    whenToUse?: string
+    source: string
+    content: string
+    resourceBase?: { kind: 'directory'; path: string }
+  }): () => void
+}
+
+export type FallbackRegistration =
+  | 'registered'
+  | 'skipped-user-skill'
+  | 'skipped-no-service'
+  | 'skipped-no-bundle'
+
+/**
+ * 仅在**用户态技能缺失**时注册回退技能。
+ *
+ * 硬约束：dsh-skill 的 `register()` 层级是 **project > runtime > user**，而
+ * `<DSH_HOME>/skills` 属于 user 层 —— 无条件注册一个同名 runtime 技能会**遮蔽用户态技能本身**
+ * （2026-09-17 查 dsh-skill 的 `lib/types/index.d.ts` 确认）。对本机而言那等于把天天在改的规则
+ * 真源盖掉，是绝不能出的错。故这里先做文件系统判定，存在就一步都不做。
+ */
+export function registerFallbackSkill(
+  ctx: unknown,
+  options: { skillsRoot: string; bundledSkillDir: string | null; enginePath: string },
+): FallbackRegistration {
+  if (existsSync(join(options.skillsRoot, SKILL_NAME, 'SKILL.md'))) return 'skipped-user-skill'
+  const skills = (ctx as { skills?: SkillServiceLike }).skills
+  if (skills === undefined || typeof skills.register !== 'function') return 'skipped-no-service'
+  if (!options.bundledSkillDir) return 'skipped-no-bundle'
+  const skillMd = join(options.bundledSkillDir, 'SKILL.md')
+  if (!existsSync(skillMd)) return 'skipped-no-bundle'
+
+  const content = readFileSync(skillMd, 'utf8')
+  skills.register({
+    name: SKILL_NAME,
+    description:
+      frontmatterField(content, 'description') ??
+      'DSH skill audit: deterministic static checks over skill frontmatter, script usability, reference integrity, credential leakage, machine-specific paths and dangerous commands.',
+    whenToUse:
+      frontmatterField(content, 'whenToUse') ??
+      'A skill was created, edited, or restored from a backup repository; you need to know whether a skill is usable, self-consistent, and free of leaked credentials.',
+    source: 'runtime',
+    content: rewriteEnginePaths(content, options.enginePath),
+    resourceBase: { kind: 'directory', path: options.bundledSkillDir },
+  })
+  return 'registered'
 }
 
 /** 从工具参数里尽力提取被操作的路径（不同工具键名不同，另有兜底扫描）。 */
@@ -196,8 +333,11 @@ export function parseReport(text: string): AuditReport | null {
 
 export function apply(ctx: Context, config: SkillAuditConfig = {}): void {
   const skillsRoot = (config.skillsRoot ?? join(dshHome(), 'skills')).replace(/[\\/]+$/, '')
+  const bundledSkillDir = resolveBundledSkillDir()
+  const resolved = resolveEngine({ configured: config.auditScript, skillsRoot, bundledSkillDir })
+  // 解析不到时仍算出"期望路径"作为报错文案（显式配置优先展示用户给的那条）。
   const auditScript =
-    config.auditScript ?? join(skillsRoot, 'skill-audit', 'scripts', 'audit-skills.ps1')
+    resolved?.path ?? config.auditScript ?? join(skillsRoot, SKILL_NAME, ENGINE_RELATIVE)
   const powershell = config.powershell ?? POWERSHELL
   const autoAudit = config.autoAudit !== false
   const timeoutMs =
@@ -457,7 +597,15 @@ export function apply(ctx: Context, config: SkillAuditConfig = {}): void {
     }
   }
 
+  // 回退技能注册与 autoAudit 无关：它决定"模型能不能加载到 skill-audit 技能"，
+  // 而不是"要不要自动跑审核"。用户态技能在场时这一步是空操作。
+  const fallbackSkill = registerFallbackSkill(ctx, {
+    skillsRoot,
+    bundledSkillDir,
+    enginePath: auditScript,
+  })
+
   ctx.logger.info(
-    `[tool-skill-audit] registered "skill_audit" — script=${auditScript} skillsRoot=${skillsRoot} autoAudit=${autoAudit}`,
+    `[tool-skill-audit] registered "skill_audit" — engine=${auditScript} (${resolved?.source ?? 'MISSING'}) skillsRoot=${skillsRoot} autoAudit=${autoAudit} fallbackSkill=${fallbackSkill}`,
   )
 }

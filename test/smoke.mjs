@@ -22,7 +22,8 @@ import { join } from 'node:path'
 
 const pluginDist = process.env.SMOKE_PLUGIN_DIST ?? new URL('../dist/index.js', import.meta.url).href
 console.log(`plugin under test: ${pluginDist}`)
-const { apply, planAudit, parseReport } = await import(pluginDist)
+const { apply, planAudit, parseReport, resolveEngine, resolveBundledSkillDir, registerFallbackSkill, rewriteEnginePaths } =
+  await import(pluginDist)
 
 const PS = 'C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe'
 const HOME = process.env.USERPROFILE ?? process.env.HOME ?? '.'
@@ -236,6 +237,95 @@ const silentOut = await silent(
   nextReturning({ kind: 'enter' }),
 )
 check('auto path stays silent when the engine is missing', !silentOut?.additionalContexts, JSON.stringify(silentOut))
+
+console.log('--- 10) engine resolution precedence ---')
+{
+  const only = (present) => (p) => present.includes(p)
+  const cfgPath = join(root, 'cfg.ps1')
+  const userEngine = join(skillsRoot, 'skill-audit', 'scripts', 'audit-skills.ps1')
+  const bundledDir = join('X:', 'pkg', 'skill')
+  const bundledEngine = join(bundledDir, 'scripts', 'audit-skills.ps1')
+  const at = (opts) => resolveEngine({ skillsRoot, ...opts })?.source ?? null
+  check('configured + exists → config', at({ configured: cfgPath, isFile: only([cfgPath]) }) === 'config')
+  check(
+    'configured + missing → null (no silent fallback to another engine)',
+    at({ configured: cfgPath, bundledSkillDir: bundledDir, isFile: only([bundledEngine]) }) === null,
+  )
+  check('no config, user-land skill present → user-skill', at({ isFile: only([userEngine]) }) === 'user-skill')
+  check(
+    'no config, no user-land skill → bundled',
+    at({ bundledSkillDir: bundledDir, isFile: only([bundledEngine]) }) === 'bundled',
+  )
+  check('nothing available → null', at({ isFile: only([]) }) === null)
+}
+
+console.log('--- 11) fallback skill registration guard ---')
+const bundled = resolveBundledSkillDir(pluginDist)
+check('bundled skill dir located from the built module', typeof bundled === 'string' && /[\\/]skill$/.test(bundled), String(bundled))
+{
+  let registered = null
+  const skillsCtx = { skills: { register: (s) => { registered = s; return () => {} } } }
+  const opts = { skillsRoot, bundledSkillDir: bundled, enginePath: 'E:/x.ps1' }
+
+  // 用户态技能在场 → 一步都不能做：runtime 层高于 user 层，注册会遮蔽用户态技能本身。
+  mkdirSync(join(skillsRoot, 'skill-audit'), { recursive: true })
+  writeFileSync(join(skillsRoot, 'skill-audit', 'SKILL.md'), '---\nname: skill-audit\n---\n', 'utf8')
+  check('user-land skill present → skipped', registerFallbackSkill(skillsCtx, opts) === 'skipped-user-skill')
+  check('nothing registered while the user-land skill exists', registered === null)
+
+  rmSync(join(skillsRoot, 'skill-audit'), { recursive: true, force: true })
+  const verdict = registerFallbackSkill(skillsCtx, opts)
+  check('user-land skill absent → registered', verdict === 'registered', verdict)
+  check('registered under the canonical name', registered?.name === 'skill-audit', String(registered?.name))
+  check('declares runtime source (required by dsh-skill)', registered?.source === 'runtime', String(registered?.source))
+  check(
+    'description / whenToUse parsed from the bundled frontmatter',
+    (registered?.description ?? '').length > 40 && (registered?.whenToUse ?? '').length > 20,
+    `desc=${(registered?.description ?? '').length} when=${(registered?.whenToUse ?? '').length}`,
+  )
+  check(
+    'resourceBase points at the bundled dir (so relative paths resolve)',
+    registered?.resourceBase?.kind === 'directory' && registered.resourceBase.path === bundled,
+    JSON.stringify(registered?.resourceBase),
+  )
+  check('engine path substituted into the body', (registered?.content ?? '').includes('E:/x.ps1'))
+  check('no skills service → skipped', registerFallbackSkill({}, opts) === 'skipped-no-service')
+}
+
+console.log('--- 12) bundled assets integrity ---')
+{
+  const bundledEngine = join(bundled, 'scripts', 'audit-skills.ps1')
+  check('bundled engine shipped', existsSync(bundledEngine))
+  const bom = readFileSync(bundledEngine).subarray(0, 3)
+  check(
+    'bundled engine keeps its UTF-8 BOM (5.1 would mis-decode Chinese without it)',
+    bom[0] === 0xef && bom[1] === 0xbb && bom[2] === 0xbf,
+    [...bom].join(','),
+  )
+  const bundledMd = readFileSync(join(bundled, 'SKILL.md'), 'utf8')
+  check('bundled SKILL.md is the real skill (name matches)', /^name:\s*skill-audit\s*$/m.test(bundledMd))
+
+  const sample =
+    'a "$env:USERPROFILE\\.dsh\\skills\\skill-audit\\scripts\\audit-skills.ps1" b <DSH_HOME>/skills/skill-audit/scripts/audit-skills.ps1 c'
+  const rewritten = rewriteEnginePaths(sample, 'E:/x.ps1')
+  check('rewrites the $env:USERPROFILE literal', !rewritten.includes('$env:USERPROFILE'), rewritten)
+  check('rewrites the <DSH_HOME> literal', !rewritten.includes('<DSH_HOME>'), rewritten)
+  check('replaces every occurrence', (rewritten.match(/E:\/x\.ps1/g) ?? []).length === 2, rewritten)
+}
+
+console.log('--- 13) apply() reports which engine won ---')
+{
+  const logs = []
+  let liveTool
+  apply(
+    { ...ctx, tools: { register: (t) => { liveTool = t } }, logger: { info: (m) => logs.push(m), warn: () => {} } },
+    { skillsRoot, powershell: PS }, // 不传 auditScript → 走自动解析
+  )
+  const line = logs.join('\n')
+  check('startup log names the resolved engine source', /engine=.*\((config|user-skill|bundled|MISSING)\)/.test(line), line)
+  check('startup log reports the fallback-skill verdict', /fallbackSkill=(registered|skipped-[a-z-]+)/.test(line), line)
+  check('tool still registered without an explicit auditScript', liveTool?.name === 'skill_audit', String(liveTool?.name))
+}
 
 rmSync(root, { recursive: true, force: true })
 console.log('')

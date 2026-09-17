@@ -1,6 +1,6 @@
 {
   "name": "@caesarloo/dsh-skill-audit",
-  "version": "0.1.2",
+  "version": "0.2.0",
   "description": "Audit DSH skills automatically: a host-layer tools/post-execute plugin that runs the skill-audit engine after skill files change (write/edit/shell) or after a dsh_config_git_backup restore, feeding findings back to the model as context; also registers the skill_audit tool.",
   "keywords": [
     "dsh",
@@ -23,7 +23,8 @@
   },
   "files": [
     "dist",
-    "cordis.patch.yml"
+    "cordis.patch.yml",
+    "skill"
   ],
   "dsh": {
     "bundle": {
@@ -33,7 +34,8 @@
   "scripts": {
     "build": "tsc -p tsconfig.json",
     "typecheck": "tsc -p tsconfig.json --noEmit",
-    "test": "node test/smoke.mjs"
+    "test": "node test/smoke.mjs",
+    "sync-skill": "node scripts/sync-skill.mjs"
   },
   "peerDependencies": {
     "@deepseek-ai/cordis": "^4.0.1",

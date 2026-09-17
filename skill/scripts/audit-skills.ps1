@@ -1,0 +1,480 @@
+﻿#Requires -Version 5.1
+<#
+.SYNOPSIS
+    DSH 技能静态审核（skill-audit）—— 对技能目录做确定性检查，输出人读报告或 JSON。
+
+.DESCRIPTION
+    审核项（代码即判据，避免"看着像没问题"）：
+      F1  frontmatter 契约：name / description 必填；name 须 kebab-case 且与目录名一致；
+          whenToUse 建议存在；version / last_updated 建议存在        → fail / warn
+      S1  脚本可用性：技能内所有 .ps1 必须是 UTF-8 with BOM，且能被
+          PowerShell 5.1 解析（errs=0）—— 无 BOM 的中文脚本在 5.1 下按 GBK
+          解码会解析失败（见 {local-skill} §7.1）                  → fail
+      R1  引用完整性：SKILL.md 里 `scripts/xxx.ps1` 这类相对路径引用必须真实存在；
+          子目录在而文件缺 = fail（真断裂）；引用落在**别的技能**里 = warn（跨技能引用，
+          应改为点名技能名 + related_skills）；都不在 = warn（运行时生成/外部来源） → fail / warn
+      R2  脚本被引用：技能内脚本未被 SKILL.md 提及                       → info
+      F2  依赖声明：related_skills 的自依赖 / 重复项（**存在性不在此判定**：技能名可由
+          插件运行时注册、磁盘无 SKILL.md，静态检查必误报 → 归插件侧）        → warn
+      M1  豁免标记契约：audit:ignore 标记缺代码或理由不足 8 字符         → warn
+      X1  敏感信息：口令 / token / 私钥特征串                          → fail
+      X2  机器专属硬编码路径（C:\Users\<具体用户名>）                   → info
+      X3  危险命令（递归强删、注册表删除等）                            → info
+
+    例外豁免（详见 Get-AuditWaivers）：
+      SKILL.md 里的 <!-- audit:ignore <代码> <目标> <理由，至少 8 字符> -->
+      可跳过 warn / info 级误报（逐条、带理由）；fail 级**不可**豁免，判据本身不放宽。
+
+    退出码：0 = 无 fail；1 = 至少一项 fail（须修复）；2 = 参数/路径错误。
+    本脚本自身必须带 UTF-8 BOM，并由 powershell(5.1) 或 pwsh 执行。
+
+.PARAMETER Skill
+    技能名（可多个，逗号分隔）；缺省审核 SkillsRoot 下全部技能。
+
+.PARAMETER SkillsRoot
+    技能根目录；缺省 $env:DSH_HOME\skills，再回落 ~\.dsh\skills。
+
+.PARAMETER Json
+    以 JSON 输出（供钩子/机器消费）。
+
+.PARAMETER NoLog
+    不写审核日志（默认写入 <DSH_HOME>\vet\skill-audits\）。
+
+.EXAMPLE
+    powershell -NoProfile -ExecutionPolicy Bypass -File audit-skills.ps1
+.EXAMPLE
+    powershell -NoProfile -ExecutionPolicy Bypass -File audit-skills.ps1 -Skill {local-skill} -Json
+#>
+[CmdletBinding()]
+param(
+    [string[]]$Skill,
+    [string]$SkillsRoot,
+    [switch]$Json,
+    [switch]$NoLog
+)
+
+# 审核日志是确定性检查的留痕（本机目录，不进同步面）；只保留最近 40 份避免堆积。
+$ErrorActionPreference = 'Continue'
+
+# -Skill 的逗号兼容：`powershell -File script.ps1 -Skill a,b` 在 -File 模式下**不会**把逗号解析成
+# 数组（得到单个 "a,b" 字符串），而 dsh-skill-audit 插件正是以子进程 argv 方式传入 skills.join(',')——
+# 不兼容会让「多技能定向审核」直接报「技能不存在：a,b」（2026-09-17 实测）。这里统一按逗号拆分，
+# 使 CLI（`.\audit-skills.ps1 -Skill a,b`）与插件子进程调用的行为一致。
+if ($Skill) {
+    $Skill = @($Skill | ForEach-Object { $_ -split ',' } | ForEach-Object { $_.Trim() } | Where-Object { $_ })
+}
+
+# stdout 统一 UTF-8：5.1 默认按控制台代码页(GBK)写输出，消费方（插件用 Node 按 UTF-8 解码、
+# 钩子按 UTF-8 读）会拿到乱码。显式设置后，本脚本在任何宿主里的输出编码都一致。
+try { [Console]::OutputEncoding = New-Object System.Text.UTF8Encoding($false) } catch { }
+
+function Get-DshHome {
+    if ($env:DSH_HOME) { return $env:DSH_HOME }
+    return (Join-Path $env:USERPROFILE '.dsh')
+}
+
+if (-not $SkillsRoot) { $SkillsRoot = Join-Path (Get-DshHome) 'skills' }
+if (-not (Test-Path -LiteralPath $SkillsRoot)) {
+    Write-Error "技能根目录不存在：$SkillsRoot"
+    exit 2
+}
+$SkillsRoot = (Resolve-Path -LiteralPath $SkillsRoot).Path
+
+# —— 审核项实现 ————————————————————————————————————————————————
+
+function Get-FrontmatterText {
+    param([string]$Text)
+    if (-not $Text.StartsWith('---')) { return $null }
+    $end = $Text.IndexOf("`n---", 3)
+    if ($end -lt 0) { return $null }
+    return $Text.Substring(3, $end - 3)
+}
+
+function Get-FrontmatterField {
+    param([string]$Frontmatter, [string]$Key)
+    if (-not $Frontmatter) { return $null }
+    $m = [regex]::Match($Frontmatter, "(?m)^$([regex]::Escape($Key))\s*:\s*(.+?)\s*$")
+    if (-not $m.Success) { return $null }
+    $v = $m.Groups[1].Value.Trim()
+    $v = $v.Trim('"').Trim("'")
+    return $v
+}
+
+function Test-KebabCase {
+    param([string]$Name)
+    return ($Name -match '^[a-z0-9]+(-[a-z0-9]+)*$')
+}
+
+function Test-Utf8Bom {
+    param([string]$Path)
+    $b = [System.IO.File]::ReadAllBytes($Path)
+    return ($b.Length -ge 3 -and $b[0] -eq 0xEF -and $b[1] -eq 0xBB -and $b[2] -eq 0xBF)
+}
+
+function Test-PsParse {
+    param([string]$Path)
+    $errs = $null
+    [void][System.Management.Automation.Language.Parser]::ParseFile($Path, [ref]$null, [ref]$errs)
+    return @($errs).Count
+}
+
+# 敏感串：特征明确才报，避免把文档里的占位符（<token>、sk-xxx）当泄漏。
+$script:SecretPatterns = @(
+    @{ Name = 'OpenAI 风格 key';   Pattern = 'sk-[A-Za-z0-9_\-]{20,}' },
+    @{ Name = 'GitHub token';      Pattern = 'gh[pousr]_[A-Za-z0-9]{30,}' },
+    @{ Name = 'npm token';         Pattern = 'npm_[A-Za-z0-9]{30,}' },
+    @{ Name = 'AWS access key';    Pattern = 'AKIA[0-9A-Z]{16}' },
+    @{ Name = '私钥块';            Pattern = '-----BEGIN [A-Z ]*PRIVATE KEY-----' },
+    @{ Name = '明文口令赋值';      Pattern = '(?i)(password|passwd|pwd)\s*[:=]\s*[''"][^''"<>\s]{8,}[''"]' },
+    @{ Name = '明文 token 赋值';   Pattern = '(?i)(token|secret|apikey|api_key|accesskey)\s*[:=]\s*[''"][A-Za-z0-9_\-]{16,}[''"]' }
+)
+
+function Test-Secrets {
+    param([string]$Text)
+    $hits = @()
+    foreach ($p in $script:SecretPatterns) {
+        if ([regex]::IsMatch($Text, $p.Pattern)) { $hits += $p.Name }
+    }
+    return $hits
+}
+
+# 机器专属路径：具体用户名写死（通用写法 $env:USERPROFILE / %USERPROFILE% / ~ 不算）
+function Get-MachinePaths {
+    param([string]$Text)
+    $hits = @()
+    foreach ($m in [regex]::Matches($Text, '(?i)C:\\+Users\\+([A-Za-z0-9_.\-]+)')) {
+        $u = $m.Groups[1].Value
+        if ($u -ne 'Public' -and $u -notmatch '^%' -and $u -ne '<user>') { $hits += $m.Value }
+    }
+    return @($hits | Sort-Object -Unique)
+}
+
+$script:DangerPatterns = @(
+    @{ Name = '递归强删'; Pattern = '(?i)Remove-Item[^\r\n]*-Recurse[^\r\n]*-Force' },
+    @{ Name = 'rm -rf';   Pattern = '(?i)\brm\s+-[a-z]*r[a-z]*f|\brm\s+-[a-z]*f[a-z]*r' },
+    @{ Name = '注册表删除'; Pattern = '(?i)reg\s+delete' },
+    @{ Name = '磁盘格式化'; Pattern = '(?i)Format-Volume|format\s+[A-Z]:' }
+)
+
+function Get-DangerHits {
+    param([string]$Text)
+    $hits = @()
+    foreach ($p in $script:DangerPatterns) {
+        if ([regex]::IsMatch($Text, $p.Pattern)) { $hits += $p.Name }
+    }
+    return $hits
+}
+
+# SKILL.md 中的相对资源引用（scripts\… / scripts/… / ./scripts/…）
+function Get-RelRefs {
+    param([string]$Text)
+    $refs = @()
+    foreach ($m in [regex]::Matches($Text, '(?i)(?<![\w\\/])(?:\.?[\\/])?(scripts|assets|references)[\\/]([A-Za-z0-9_.\-]+)')) {
+        $refs += ($m.Groups[1].Value + '\' + $m.Groups[2].Value)
+    }
+    return @($refs | Sort-Object -Unique)
+}
+
+# 跨技能引用识别：某相对引用在本技能里没有、但在**同根下的另一个技能**里存在 —— 这不是
+# "引用断裂"，而是"抄了别的技能的内部路径"（耦合）。判据由此从"文件在不在"升级为"该不该由你
+# 来指这个路径"，并直接给出确定修法：正文点名技能名 + frontmatter 登记 related_skills。
+# （2026-09-17：用户定下"技能间引用一律解耦"后新增，见 skill-audit §5.1。）
+function Find-RefOwner {
+    param([string]$Ref, [string]$SelfSkill)
+    foreach ($d in @(Get-ChildItem -LiteralPath $SkillsRoot -Directory -ErrorAction SilentlyContinue)) {
+        if ($d.Name -eq $SelfSkill) { continue }
+        if (Test-Path -LiteralPath (Join-Path $d.FullName $Ref)) { return $d.Name }
+    }
+    return $null
+}
+
+# related_skills 声明解析（frontmatter 里 metadata.hermes.related_skills: [a, b]）
+function Get-RelatedSkills {
+    param([string]$Frontmatter)
+    if (-not $Frontmatter) { return @() }
+    $m = [regex]::Match($Frontmatter, '(?m)^\s*related_skills\s*:\s*\[(.*?)\]')
+    if (-not $m.Success) { return @() }
+    return @($m.Groups[1].Value -split ',' | ForEach-Object { $_.Trim().Trim('"').Trim("'") } | Where-Object { $_ })
+}
+
+function New-Finding {
+    param([string]$Code, [string]$Level, [string]$Message, [string]$File, [string]$Target = '')
+    return [pscustomobject]@{ code = $Code; level = $Level; message = $Message; file = $File; target = $Target }
+}
+
+# —— 例外豁免（audit:ignore 标记）——
+# 这不是"放宽判据"：判据强度一律不变（真断裂依旧 fail），只是让**技能自己就地声明**某条判据不适用。
+# 形式（写在 SKILL.md 里）：<!-- audit:ignore <代码> <目标> <理由，至少 8 字符> -->
+#   代码：F1 / S1 / R1 / X1 / X2 / X3 之一，或 *（全部）
+#   目标：R1 用相对引用（references/core.md，斜杠两种写法等价）；其它代码用文件名（SKILL.md 或脚本名）
+# 为什么要它：skill-audit §五 早已要求"误报就在技能正文写明例外与理由"，但此前写了并不生效——
+#   规则与实现脱节，结果只剩两条歪路：要么忍受常驻噪音（久了审核被无视），要么改正文措辞回避正则
+#   （那是掩盖检测，更糟）。本机制把"写明例外"变成可执行的唯一正解：逐条、带理由、随技能进 git 可审计。
+function Get-RefKey {
+    param([string]$Ref)
+    if (-not $Ref) { return '' }
+    return (($Ref -replace '/', '\').TrimStart('.').TrimStart('\').ToLowerInvariant())
+}
+
+function Get-AuditWaivers {
+    param([string]$Text)
+    $waivers = @(); $bad = @()
+    if (-not $Text) { return @{ waivers = @(); bad = @() } }
+    foreach ($m in [regex]::Matches($Text, '(?s)<!--\s*audit:ignore\s+(?<codes>[A-Za-z0-9_*\s,]+?)\s+(?<target>\S+)\s+(?<reason>.+?)\s*-->')) {
+        $codes = @($m.Groups['codes'].Value -split '[,\s]+' | Where-Object { $_ } | ForEach-Object { $_.ToUpperInvariant() })
+        $reason = $m.Groups['reason'].Value.Trim()
+        if ($codes.Count -eq 0 -or $reason.Length -lt 8) { $bad += $m.Value; continue }
+        $waivers += [pscustomobject]@{ codes = $codes; target = (Get-RefKey $m.Groups['target'].Value); reason = $reason }
+    }
+    return @{ waivers = @($waivers); bad = @($bad) }
+}
+
+function Test-Waived {
+    param($Finding, $Waivers)
+    # fail 级不可豁免：§五「fail 必须修」是硬线，豁免只用来消解 warn/info 的误报，
+    # 否则"真断裂仍是 fail"这条保证会被一个标记悄悄绕过。
+    if ($Finding.level -eq 'fail') { return $false }
+    $t = if ($Finding.target) { Get-RefKey $Finding.target } else { Get-RefKey $Finding.file }
+    foreach ($w in $Waivers) {
+        if ($w.codes -notcontains '*' -and $w.codes -notcontains $Finding.code) { continue }
+        if ($w.target -and $w.target -eq $t) { return $true }
+    }
+    return $false
+}
+
+function Invoke-SkillAudit {
+    param([string]$SkillDir)
+
+    $name = Split-Path $SkillDir -Leaf
+    $findings = New-Object System.Collections.ArrayList
+    $skillMd = Join-Path $SkillDir 'SKILL.md'
+
+    # —— F1 frontmatter 契约 ——
+    $text = ''
+    if (-not (Test-Path -LiteralPath $skillMd)) {
+        [void]$findings.Add((New-Finding 'F1' 'fail' '缺少 SKILL.md（技能目录必须包含 SKILL.md）' $name))
+    }
+    else {
+        $text = [System.IO.File]::ReadAllText($skillMd)
+        $fm = Get-FrontmatterText $text
+        if (-not $fm) {
+            [void]$findings.Add((New-Finding 'F1' 'fail' 'SKILL.md 缺少 YAML frontmatter（--- 块）' 'SKILL.md'))
+        }
+        else {
+            $fname = Get-FrontmatterField $fm 'name'
+            $fdesc = Get-FrontmatterField $fm 'description'
+            $fwhen = Get-FrontmatterField $fm 'whenToUse'
+            $fver  = Get-FrontmatterField $fm 'version'
+            $fupd  = Get-FrontmatterField $fm 'last_updated'
+
+            if (-not $fname) {
+                [void]$findings.Add((New-Finding 'F1' 'fail' 'frontmatter 缺少必填字段 name' 'SKILL.md'))
+            }
+            else {
+                if (-not (Test-KebabCase $fname)) {
+                    [void]$findings.Add((New-Finding 'F1' 'fail' "name 必须是 kebab-case：$fname" 'SKILL.md'))
+                }
+                if ($fname -ne $name) {
+                    [void]$findings.Add((New-Finding 'F1' 'fail' "frontmatter name($fname) 与目录名($name) 不一致" 'SKILL.md'))
+                }
+            }
+            if (-not $fdesc) {
+                [void]$findings.Add((New-Finding 'F1' 'fail' 'frontmatter 缺少必填字段 description（模型据此决定是否加载）' 'SKILL.md'))
+            }
+            elseif ($fdesc.Length -lt 40) {
+                [void]$findings.Add((New-Finding 'F1' 'warn' "description 过短（$($fdesc.Length) 字符），建议写清触发场景与触发词" 'SKILL.md'))
+            }
+            if (-not $fwhen) {
+                [void]$findings.Add((New-Finding 'F1' 'warn' '建议补 whenToUse：写清什么情况下该加载本技能' 'SKILL.md'))
+            }
+            if (-not $fver) {
+                [void]$findings.Add((New-Finding 'F1' 'warn' '建议补 version：便于多机同步时判断新旧' 'SKILL.md'))
+            }
+            if (-not $fupd) {
+                [void]$findings.Add((New-Finding 'F1' 'warn' '建议补 last_updated：便于判断内容是否过期' 'SKILL.md'))
+            }
+
+            # —— F2 依赖声明完整性（只做「文件系统可判定」的部分）——
+            # 为什么不查"指向的技能是否存在"：DSH 允许**插件在运行时注册技能**——磁盘上没有 SKILL.md，
+            # 例如 @jieai/dsh-plugin-vet 注册的 {local-skill}（其 lib/skills/audit-protocol.js 只是把
+            # 包内的 AUDIT_PROTOCOL.md 注册进会话技能目录）。也就是说"技能名"的解析域是**运行时技能目录**，
+            # 不是文件系统；静态脚本查不到，查了必然误报（2026-09-17 实测：此检查一上线就误报
+            # skill-audit 声明的 {local-skill}）。故这里只报**一定错**的两种：自依赖、重复项。
+            # 「悬空声明」检测需要活的技能目录 → 属**插件侧**能力（见 SKILL.md §2.1 的三层分工）。
+            $rs = @(Get-RelatedSkills $fm)
+            if ($rs -contains $name) {
+                [void]$findings.Add((New-Finding 'F2' 'warn' "related_skills 含技能自身（$name）——自依赖无意义" 'SKILL.md' $name))
+            }
+            foreach ($dj in @($rs | Group-Object | Where-Object { $_.Count -gt 1 } | Select-Object -ExpandProperty Name)) {
+                [void]$findings.Add((New-Finding 'F2' 'warn' "related_skills 存在重复项：$dj" 'SKILL.md' $dj))
+            }
+        }
+    }
+
+    # —— S1 脚本可用性（BOM + 5.1 解析）——
+    $ps1 = @(Get-ChildItem -LiteralPath $SkillDir -Recurse -File -Filter *.ps1 -ErrorAction SilentlyContinue)
+    foreach ($f in $ps1) {
+        if (-not (Test-Utf8Bom $f.FullName)) {
+            [void]$findings.Add((New-Finding 'S1' 'fail' "脚本缺少 UTF-8 BOM（5.1 下中文会按 GBK 解码而解析失败）：$($f.Name)" $f.FullName))
+        }
+        $errCount = Test-PsParse $f.FullName
+        if ($errCount -gt 0) {
+            [void]$findings.Add((New-Finding 'S1' 'fail' "脚本解析失败（$errCount 个错误）：$($f.Name)" $f.FullName))
+        }
+    }
+
+    # —— 例外豁免标记（audit:ignore），见文件头 Get-AuditWaivers 的说明 ——
+    $waivers = @()
+    $wi = Get-AuditWaivers $text
+    $waivers = $wi.waivers
+    foreach ($b in $wi.bad) {
+        $shown = if ($b.Length -gt 70) { $b.Substring(0, 70) + '…' } else { $b }
+        [void]$findings.Add((New-Finding 'M1' 'warn' "audit:ignore 标记无效（理由不足 8 字符或缺代码），已忽略：$shown" 'SKILL.md'))
+    }
+
+    # —— R1 引用完整性 ——
+    if ($text) {
+        # 判据收紧（2026-09-17 实测的误报来源）：
+        #   ① 正文举例（如 `scripts/xxx.ps1`）不是引用 → 含占位符的 token 跳过；
+        #   ② 引用指向别的技能或外部来源（如 Hermes 的 references/…）时，本技能目录下
+        #      根本不存在该子目录 → 只记 warn（否则体检被噪音淹没，最后被无视）；
+        #   ③ 只有「子目录确实存在、而其中文件缺失」才是真引用断裂 → fail。
+        foreach ($ref in (Get-RelRefs $text)) {
+            if ($ref -match '(?i)xxx|<[^>]*>|\.\.\.|\*') { continue }
+            $target = Join-Path $SkillDir $ref
+            if (Test-Path -LiteralPath $target) { continue }
+            $subDir = Split-Path $ref -Parent
+            if (-not (Test-Path -LiteralPath (Join-Path $SkillDir $subDir))) {
+                # 先判是不是"抄了别的技能的路径"——这比"文件不存在"更具体、且有确定修法。
+                $owner = Find-RefOwner -Ref $ref -SelfSkill $name
+                if ($owner) {
+                    [void]$findings.Add((New-Finding 'R1' 'warn' "跨技能引用：$ref 属于技能 $owner —— 正文应只点名技能名，并在 frontmatter 登记 metadata.hermes.related_skills，不要抄对方内部路径（对方改名即失效）" 'SKILL.md' $ref))
+                }
+                else {
+                    [void]$findings.Add((New-Finding 'R1' 'warn' "SKILL.md 提到 $ref，但本技能没有 $subDir 目录（运行时生成或外部来源可忽略）" 'SKILL.md' $ref))
+                }
+            }
+            else {
+                [void]$findings.Add((New-Finding 'R1' 'fail' "SKILL.md 引用的资源不存在：$ref" 'SKILL.md' $ref))
+            }
+        }
+        # 反向：脚本资产未被任何地方引用（提示，不算失败）
+        foreach ($f in $ps1) {
+            $rel = $f.FullName.Substring($SkillDir.Length).TrimStart('\')
+            if ($text -notmatch [regex]::Escape($f.Name)) {
+                [void]$findings.Add((New-Finding 'R2' 'info' "脚本未被 SKILL.md 引用：$rel" $rel))
+            }
+        }
+    }
+
+    # —— X1 / X2 / X3 内容侧检查（SKILL.md + 全部文本资产）——
+    $textFiles = @()
+    if ($skillMd -and (Test-Path -LiteralPath $skillMd)) { $textFiles += $skillMd }
+    $textFiles += @(Get-ChildItem -LiteralPath $SkillDir -Recurse -File -Include *.ps1, *.md, *.json, *.sh, *.py, *.yml, *.yaml -ErrorAction SilentlyContinue |
+        Where-Object { $_.FullName -ne $skillMd } | Select-Object -ExpandProperty FullName)
+
+    $secretHits = @(); $machineHits = @(); $dangerHits = @()
+    foreach ($tf in $textFiles) {
+        $body = [System.IO.File]::ReadAllText($tf)
+        foreach ($h in (Test-Secrets $body)) { $secretHits += "$h @ $(Split-Path $tf -Leaf)" }
+        foreach ($h in (Get-MachinePaths $body)) { $machineHits += "$h @ $(Split-Path $tf -Leaf)" }
+        foreach ($h in (Get-DangerHits $body)) { $dangerHits += "$h @ $(Split-Path $tf -Leaf)" }
+    }
+    foreach ($h in @($secretHits | Sort-Object -Unique)) {
+        [void]$findings.Add((New-Finding 'X1' 'fail' "疑似凭据/密钥特征：$h" 'SKILL.md'))
+    }
+    foreach ($h in @($machineHits | Sort-Object -Unique)) {
+        [void]$findings.Add((New-Finding 'X2' 'info' "硬编码机器专属路径：$h" '' ($h -split ' @ ')[-1]))
+    }
+    foreach ($h in @($dangerHits | Sort-Object -Unique)) {
+        [void]$findings.Add((New-Finding 'X3' 'info' "含危险命令模式（确认用途）：$h" '' ($h -split ' @ ')[-1]))
+    }
+
+    # —— 应用 audit:ignore 例外（判据不放宽，只跳过被显式声明为不适用的条目）——
+    if (@($waivers).Count -gt 0) {
+        $survivors = @($findings | Where-Object { -not (Test-Waived $_ $waivers) })
+        $kept = New-Object System.Collections.ArrayList
+        foreach ($s in $survivors) { [void]$kept.Add($s) }
+        $findings = $kept
+    }
+
+    $fails = @($findings | Where-Object { $_.level -eq 'fail' }).Count
+    $warns = @($findings | Where-Object { $_.level -eq 'warn' }).Count
+    $status = if ($fails -gt 0) { 'fail' } elseif ($warns -gt 0) { 'warn' } else { 'pass' }
+
+    return [pscustomobject]@{
+        skill    = $name
+        status   = $status
+        fails    = $fails
+        warns    = $warns
+        scripts  = $ps1.Count
+        findings = @($findings)
+    }
+}
+
+# —— 主流程 ————————————————————————————————————————————————
+
+$targets = @()
+if ($Skill) {
+    foreach ($s in $Skill) {
+        $d = Join-Path $SkillsRoot $s
+        if (Test-Path -LiteralPath $d) { $targets += (Resolve-Path -LiteralPath $d).Path }
+        else { Write-Error "技能不存在：$s（根：$SkillsRoot）"; exit 2 }
+    }
+}
+else {
+    $targets = @(Get-ChildItem -LiteralPath $SkillsRoot -Directory -ErrorAction SilentlyContinue |
+        Where-Object { Test-Path -LiteralPath (Join-Path $_.FullName 'SKILL.md') } |
+        Select-Object -ExpandProperty FullName | Sort-Object)
+}
+
+$results = @()
+foreach ($t in $targets) { $results += (Invoke-SkillAudit $t) }
+
+$failTotal = @($results | Where-Object { $_.status -eq 'fail' }).Count
+$warnTotal = @($results | Where-Object { $_.status -eq 'warn' }).Count
+
+if (-not $NoLog) {
+    $logDir = Join-Path (Get-DshHome) 'vet\skill-audits'
+    try {
+        if (-not (Test-Path -LiteralPath $logDir)) { [void](New-Item -ItemType Directory -Force -Path $logDir) }
+        $stamp = Get-Date -Format 'yyyyMMdd-HHmmss'
+        $payload = [pscustomobject]@{
+            auditedAt = (Get-Date).ToString('s')
+            skillsRoot = $SkillsRoot
+            fail = $failTotal
+            warn = $warnTotal
+            results = $results
+        }
+        # 局部变量不能叫 $json —— PowerShell 变量名不区分大小写，会撞上本脚本的 [switch]$Json 参数，
+        # 赋值字符串时报 "Cannot convert value System.String to type SwitchParameter"（2026-09-17 踩坑）。
+        $jsonText = ($payload | ConvertTo-Json -Depth 8)
+        [System.IO.File]::WriteAllText((Join-Path $logDir "audit-$stamp.json"), $jsonText, (New-Object System.Text.UTF8Encoding($false)))
+        [System.IO.File]::WriteAllText((Join-Path $logDir 'latest.json'), $jsonText, (New-Object System.Text.UTF8Encoding($false)))
+        # 只保留最近 40 份
+        $old = @(Get-ChildItem -LiteralPath $logDir -File -Filter 'audit-*.json' | Sort-Object LastWriteTime -Descending | Select-Object -Skip 40)
+        foreach ($o in $old) { Remove-Item -LiteralPath $o.FullName -Force -ErrorAction SilentlyContinue }
+    }
+    catch { Write-Warning "审核日志写入失败：$($_.Exception.Message)"; Write-Warning $_.InvocationInfo.PositionMessage }
+}
+
+if ($Json) {
+    $out = [pscustomobject]@{ auditedAt = (Get-Date).ToString('s'); skillsRoot = $SkillsRoot; fail = $failTotal; warn = $warnTotal; results = $results }
+    $out | ConvertTo-Json -Depth 8
+}
+else {
+    Write-Host "==== 技能审核：$SkillsRoot ===="
+    Write-Host ("技能数 {0}  |  fail {1}  |  warn {2}" -f $results.Count, $failTotal, $warnTotal)
+    foreach ($r in $results) {
+        $mark = switch ($r.status) { 'pass' { '[通过]' } 'warn' { '[注意]' } default { '[失败]' } }
+        Write-Host ("`n$mark {0}  (脚本 {1} 个, fail {2}, warn {3})" -f $r.skill, $r.scripts, $r.fails, $r.warns)
+        foreach ($f in $r.findings) {
+            if ($f.level -eq 'info') { continue }
+            Write-Host ("    - [{0}] {1} ({2})" -f $f.level, $f.message, $f.code)
+        }
+    }
+    if ($failTotal -gt 0) { Write-Host "`n存在 fail 项：按上面的 SKILL.md/脚本路径修复后重跑本脚本。" }
+}
+
+if ($failTotal -gt 0) { exit 1 }
+exit 0
