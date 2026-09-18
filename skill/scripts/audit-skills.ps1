@@ -12,7 +12,9 @@
           解码会解析失败                                              → fail
       R1  引用完整性：SKILL.md 里 `scripts/xxx.ps1` 这类相对路径引用必须真实存在；
           子目录在而文件缺 = fail（真断裂）；引用落在**别的技能**里 = warn（跨技能引用，
-          应改为点名技能名 + related_skills）；都不在 = warn（运行时生成/外部来源） → fail / warn
+          应改为点名技能名 + related_skills）；都不在 = warn（运行时生成/外部来源）。
+          跨技能引用**相对与绝对两种形态都判**：相对形态按引用解析，绝对形态
+          （`…\skills\<别的技能>\…`）按路径里的技能名比对（自身路径除外）      → fail / warn
       R2  脚本被引用：技能内脚本未被 SKILL.md 提及                       → info
       F2  依赖声明：related_skills 的自依赖 / 重复项（**存在性不在此判定**：技能名可由
           插件运行时注册、磁盘无 SKILL.md，静态检查必误报 → 归插件侧）        → warn
@@ -358,6 +360,28 @@ function Invoke-SkillAudit {
             else {
                 [void]$findings.Add((New-Finding 'R1' 'fail' "SKILL.md 引用的资源不存在：$ref" 'SKILL.md' $ref))
             }
+        }
+        # —— R1 补充：**绝对形态**的跨技能路径引用 ——
+        # 上面的 Get-RelRefs 只收相对引用（scripts/x.ps1），于是 `…\skills\<别的技能>\…` 这种绝对
+        # 形态从不进入任何判据：2026-09-18 实测，某技能正文引用了**已被整目录移除**的技能路径，
+        # 全量审核全绿、一条都没报（它既不是 BOM 问题，也不是"本技能内文件缺失"）。
+        # 判据：路径段里的技能名 ≠ 本技能名 → 跨技能引用（与相对形态同码同级别，修法也一样）。
+        # 两类排除：① 自身路径；② 示例/占位符行（`<DSH_HOME>/skills/…`、`xxx`）——后者仅在
+        # 该技能名**不是**同根下真实存在的技能时才跳过，免得把真死引用当举例放过。
+        $seenAbsOwner = @{}
+        foreach ($m in [regex]::Matches($text, '(?<![\w.-])skills[\\/]([A-Za-z0-9][A-Za-z0-9._-]*)[\\/]')) {
+            $owner = $m.Groups[1].Value
+            if ($owner -eq $name) { continue }
+            if ($seenAbsOwner.ContainsKey($owner)) { continue }
+            $lineStart = $text.LastIndexOf("`n", [Math]::Max(0, $m.Index - 1))
+            if ($lineStart -lt 0) { $lineStart = 0 }
+            $lineEnd = $text.IndexOf("`n", $m.Index)
+            if ($lineEnd -lt 0) { $lineEnd = $text.Length }
+            $line = $text.Substring($lineStart, $lineEnd - $lineStart)
+            $ownerIsReal = Test-Path -LiteralPath (Join-Path $SkillsRoot $owner)
+            if (-not $ownerIsReal -and $line -match '<[^>]*>|(?i)xxx|\*') { continue }
+            $seenAbsOwner[$owner] = $true
+            [void]$findings.Add((New-Finding 'R1' 'warn' "跨技能路径引用（绝对形态）：$($m.Value) 指向另一个技能 $owner —— 正文应只点名技能名，并在 frontmatter 登记 metadata.hermes.related_skills；对方改名或移除后即成死引用" 'SKILL.md' $m.Value))
         }
         # 反向：脚本资产未被任何地方引用（提示，不算失败）
         foreach ($f in $ps1) {

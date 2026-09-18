@@ -100,7 +100,7 @@ powershell -NoProfile -ExecutionPolicy Bypass -File "$env:USERPROFILE\.dsh\skill
 |---|---|---|---|
 | F1 | frontmatter 契约 | fail/warn | `name`、`description` 必填；`name` 必须 kebab-case 且与目录名一致；缺 `whenToUse`/`version`/`last_updated` → warn |
 | S1 | 脚本可用性 | fail | 技能内每个 `.ps1` 必须 UTF-8 **with BOM**，且 `Parser::ParseFile` 报错数为 0。无 BOM 的中文脚本在 Windows PowerShell 5.1 下按 GBK 解码 → 解析失败（`Missing closing ')'`），**更新过来即不可用** |
-| R1 | 引用完整性 | fail/warn | SKILL.md 里 `scripts/xxx.ps1` 这类相对引用必须真实存在。**子目录存在而文件缺失 → fail**（真断裂）；**引用落在同根下的另一个技能里 → warn「跨技能引用」**（应改为点名技能名 + `related_skills`，见 §5.1）；**连子目录都没有 → warn**（运行时生成或外部来源） |
+| R1 | 引用完整性 | fail/warn | SKILL.md 里 `scripts/xxx.ps1` 这类相对引用必须真实存在。**子目录存在而文件缺失 → fail**（真断裂）；**引用落在同根下的另一个技能里 → warn「跨技能引用」**（应改为点名技能名 + `related_skills`，见 §5.1）——**相对与绝对两种形态都判**：相对形态按引用解析，绝对形态（`…\skills\<别的技能>\…`）按路径里的技能名比对（自身路径除外，示例/占位符行跳过）；**连子目录都没有 → warn**（运行时生成或外部来源） |
 | R2 | 脚本被引用 | info | 技能内脚本未被 SKILL.md 提及（可能是死资产，也可能是刻意留的工具） |
 | F2 | 依赖声明 | warn | `metadata.hermes.related_skills` 的**自依赖 / 重复项**。**存在性刻意不查**：技能名可由插件运行时注册（磁盘无 SKILL.md），静态脚本查不到 → 查了必误报。悬空声明检测需活的技能目录，属插件侧（§2.0） |
 | E1 | 审核扩展 | warn | `audit_extension` 声明的扩展缺失 / 无 BOM / 解析失败 / 执行抛错 → 记在**声明该扩展的技能**上；抛过错的扩展立即停用且只报一次（见 §4.1） |
