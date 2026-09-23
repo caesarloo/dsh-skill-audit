@@ -24,6 +24,14 @@
       X1  敏感信息：口令 / token / 私钥特征串                          → fail
       X2  机器专属硬编码路径（C:\Users\<具体用户名>）                   → info
       X3  危险命令（递归强删、注册表删除等）                            → info
+      V1  版本号格式：version 必须是三段式 主.次.修（形如 1.2.3）        → fail
+      V2  版本号递增：技能位于 git 工作副本、且 SKILL.md 有未提交改动时，与 HEAD
+          那一版比较——降级 = 倒退；同级而内容有实质改动 = 忘了 bump（忽略空白的
+          纯排版改动不报）；取不到 git 上下文一律静默跳过               → warn
+
+    版本号规则（真源：用户全局指令「技能版本号」）：重构升第一级、新功能升第二级、
+    修 bug 升第三级，进位归零。**分级正确性不可静态判定**（要看改动性质，属人判），
+    引擎只把守两件可判定的：格式三段式（V1）、相对上一版不倒退且实质改动须 bump（V2）。
 
     例外豁免（详见 Get-AuditWaivers）：
       SKILL.md 里的 <!-- audit:ignore <代码> <目标> <理由，至少 8 字符> -->
@@ -107,6 +115,72 @@ function Get-FrontmatterField {
 function Test-KebabCase {
     param([string]$Name)
     return ($Name -match '^[a-z0-9]+(-[a-z0-9]+)*$')
+}
+
+# —— V1 / V2 版本号判据（2026-09-24 新增）——
+# 规则真源是用户全局指令的「技能版本号」一节：重构升第一级、新功能升第二级、修 bug 升第三级，
+# 进位归零。**分级正确性引擎判不了**（那要看改动性质），所以引擎只把守两件可判定的：
+#   V1 格式：一律三段式 主.次.修（fail，明确契约）。
+#   V2 递增：与"上一版"比较。上一版取 git HEAD——**只在技能目录位于 git 工作副本、且 SKILL.md
+#      有未提交改动时**才判：那一刻 HEAD 恰好就是上一版。已提交（工作区与 HEAD 一致）说明没有
+#      "改动后忘 bump"的问题；非 git 目录（如活跃源技能根）拿不到上下文；新文件 HEAD 里没有。
+#      这三种情况一律**静默跳过**——宁可漏报，不可误报（审核一旦有噪音就会被无视）。
+function Test-Semver {
+    param([string]$Value)
+    return [bool]($Value -match '^\d+\.\d+\.\d+$')
+}
+
+# git 根探测按技能根缓存：同一根下的多个技能共享一次判定；非 git 根只探一次。
+$script:GitTopCache = @{}
+
+function Get-GitTopLevel {
+    param([string]$Root)
+    if ($script:GitTopCache.ContainsKey($Root)) { return $script:GitTopCache[$Root] }
+    $top = $null
+    try {
+        $out = @(& git -C $Root rev-parse --show-toplevel 2>$null)
+        # git 在 Windows 返回正斜杠（C:/x/y）——归一化成反斜杠再比较，否则调用方的
+        # StartsWith 永远不成立、V2 静默失效（2026-09-24 实测踩到）。
+        if ($LASTEXITCODE -eq 0 -and $out.Count -gt 0) { $top = ($out[0].Trim() -replace '/', '\').TrimEnd('\') }
+    }
+    catch { $top = $null }
+    $script:GitTopCache[$Root] = $top
+    return $top
+}
+
+# 返回 @{ version = <HEAD 里的 version 或 $null>; trivial = $true 表示忽略空白后无差异 }；
+# 无法取得基线（非 git、无未提交改动、HEAD 无该文件、git 不可用）→ 返回 $null。
+function Get-BaselineSkillVersion {
+    param([string]$SkillDir, [string]$Root)
+    $top = Get-GitTopLevel $Root
+    if (-not $top) { return $null }
+    # 两侧都归一化成反斜杠形态再比（$SkillDir 来自 Resolve-Path，已是反斜杠）
+    $dirNorm = $SkillDir.TrimEnd('\', '/') -replace '/', '\'
+    if (-not $dirNorm.StartsWith($top, [System.StringComparison]::OrdinalIgnoreCase)) { return $null }
+    $rel = $dirNorm.Substring($top.Length).TrimStart('\') -replace '\\', '/'
+    $relPath = if ($rel) { "$rel/SKILL.md" } else { 'SKILL.md' }
+    try {
+        $status = @(& git -C $top status --porcelain -- $relPath 2>$null | Where-Object { $_ -match '\S' })
+        if ($status.Count -eq 0) { return $null }
+        $head = @(& git -C $top show "HEAD:$relPath" 2>$null)
+        $ver = $null
+        $trivial = $false
+        if ($head.Count -gt 0) {
+            $headText = $head -join "`n"
+            $fm = Get-FrontmatterText $headText
+            if ($fm) { $ver = Get-FrontmatterField $fm 'version' }
+            # 纯排版判定：忽略**全部空白**（空行、缩进、行尾、文件末尾换行）后内容相同 → 可不 bump。
+            # 刻意不用 `git diff -w`：它不忽略 CRLF/LF 与「文件末尾无换行」这两类差异，会把纯排版
+            # 判成实质改动而误报（2026-09-24 探针实测：只追加一个空行也报 V2）。
+            $workPath = Join-Path $SkillDir 'SKILL.md'
+            if (Test-Path -LiteralPath $workPath) {
+                $workText = [System.IO.File]::ReadAllText($workPath)
+                $trivial = (($workText -replace '\s', '') -eq ($headText -replace '\s', ''))
+            }
+        }
+        return [pscustomobject]@{ version = $ver; trivial = $trivial }
+    }
+    catch { return $null }
 }
 
 function Test-Utf8Bom {
@@ -209,7 +283,8 @@ function New-Finding {
 # —— 例外豁免（audit:ignore 标记）——
 # 这不是"放宽判据"：判据强度一律不变（真断裂依旧 fail），只是让**技能自己就地声明**某条判据不适用。
 # 形式（写在 SKILL.md 里）：<!-- audit:ignore <代码> <目标> <理由，至少 8 字符> -->
-#   代码：F1 / S1 / R1 / X1 / X2 / X3 之一，或 *（全部）
+#   代码：F1 / S1 / R1 / V1 / V2 / X1 / X2 / X3 之一，或 *（全部）
+#         （V1 是 fail 级——fail 一律不可豁免，见 Test-Waived；列出只为说明形态）
 #   目标：R1 用相对引用（references/core.md，斜杠两种写法等价）；其它代码用文件名（SKILL.md 或脚本名）
 # 为什么要它：skill-audit §五 早已要求"误报就在技能正文写明例外与理由"，但此前写了并不生效——
 #   规则与实现脱节，结果只剩两条歪路：要么忍受常驻噪音（久了审核被无视），要么改正文措辞回避正则
@@ -296,6 +371,25 @@ function Invoke-SkillAudit {
             }
             if (-not $fupd) {
                 [void]$findings.Add((New-Finding 'F1' 'warn' '建议补 last_updated：便于判断内容是否过期' 'SKILL.md'))
+            }
+
+            # —— V1 版本号格式：一律三段式 主.次.修（缺 version 仍由上面的 F1 报）——
+            if ($fver -and -not (Test-Semver $fver)) {
+                [void]$findings.Add((New-Finding 'V1' 'fail' "version 不是三段式 主.次.修：$fver（应形如 1.2.3）" 'SKILL.md'))
+            }
+            # —— V2 版本号递增：只在 git 里能取到"上一版"时判定（见 Get-BaselineSkillVersion）——
+            if ($fver -and (Test-Semver $fver)) {
+                $base = Get-BaselineSkillVersion -SkillDir $SkillDir -Root $SkillsRoot
+                if ($base -and $base.version -and (Test-Semver $base.version)) {
+                    $curVer = [version]$fver
+                    $oldVer = [version]$base.version
+                    if ($curVer -lt $oldVer) {
+                        [void]$findings.Add((New-Finding 'V2' 'warn' "version 从 $($base.version) 降为 $fver：版本号不得倒退" 'SKILL.md'))
+                    }
+                    elseif ($curVer -eq $oldVer -and -not $base.trivial) {
+                        [void]$findings.Add((New-Finding 'V2' 'warn' "SKILL.md 有实质改动但 version 未变（$fver）：按约定重构升第一级、新功能升第二级、修 bug 升第三级（纯排版可不动）" 'SKILL.md'))
+                    }
+                }
             }
 
             # —— F2 依赖声明完整性（只做「文件系统可判定」的部分）——

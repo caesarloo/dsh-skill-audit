@@ -15,7 +15,7 @@
 // compare the tarball's dist/index.js SHA256 against the local build, then let
 // `dsh --profile web --dump-config` prove the host assembles it.
 
-import { spawn } from 'node:child_process'
+import { spawn, spawnSync } from 'node:child_process'
 import { cpSync, existsSync, mkdirSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
@@ -414,6 +414,82 @@ console.log('--- 12) bundled assets integrity ---')
   check(
     'bundled skill is discoverable as a skill (its own SKILL.md is present in the mirror)',
     existsSync(join(selfRoot, 'skill-audit', 'SKILL.md')),
+  )
+}
+
+console.log('--- 12b) version 判据 V1/V2 (real engine + throwaway git repo) ---')
+{
+  const gitRoot = join(root, 'version-skills-root')
+  const verSkill = join(gitRoot, 'ver-demo')
+  mkdirSync(verSkill, { recursive: true })
+  const verMd = join(verSkill, 'SKILL.md')
+  const writeVerSkill = (version, body) =>
+    writeFileSync(
+      verMd,
+      [
+        '---',
+        'name: ver-demo',
+        'description: "版本号判据冒烟用的技能：三段式格式与递增/忘 bump 的判定目标，供 V1/V2 断言使用。"',
+        'whenToUse: "测试"',
+        `version: ${version}`,
+        'last_updated: 2026-09-24',
+        '---',
+        '',
+        '# ver-demo',
+        '',
+        body,
+        '',
+      ].join('\n'),
+      'utf8',
+    )
+  const git = (...args) => spawnSync('git', ['-C', gitRoot, ...args], { encoding: 'utf8', windowsHide: true })
+  const engineRun = (skillsRoot) => {
+    const r = spawnSync(
+      PS,
+      ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', auditScript, '-SkillsRoot', skillsRoot, '-Skill', 'ver-demo', '-Json', '-NoLog'],
+      { encoding: 'utf8', windowsHide: true },
+    )
+    return parseReport(r.stdout)
+  }
+  const codesOf = (report) => (report?.results?.[0]?.findings ?? []).map((f) => f.code)
+
+  git('init', '-q', '-b', 'main')
+  git('config', 'user.email', 'smoke@local')
+  git('config', 'user.name', 'smoke')
+  writeVerSkill('1.0.0', '正文 A')
+  git('add', '-A')
+  git('commit', '-qm', 'init')
+
+  check(
+    'V2 stays quiet when the working tree matches HEAD (nothing was edited)',
+    !codesOf(engineRun(gitRoot)).includes('V2'),
+    JSON.stringify(codesOf(engineRun(gitRoot))),
+  )
+  writeVerSkill('1.0.0', '正文 B')
+  check('V2 warns when SKILL.md changed without a bump', codesOf(engineRun(gitRoot)).includes('V2'), JSON.stringify(codesOf(engineRun(gitRoot))))
+  git('add', '-A')
+  git('commit', '-qm', 'content B')
+  writeFileSync(verMd, readFileSync(verMd, 'utf8') + '\n', 'utf8')
+  check(
+    'V2 stays quiet for whitespace-only edits (纯排版可不 bump)',
+    !codesOf(engineRun(gitRoot)).includes('V2'),
+    JSON.stringify(codesOf(engineRun(gitRoot))),
+  )
+  writeVerSkill('1.1.0', '正文 C')
+  check('V2 stays quiet after a proper bump', !codesOf(engineRun(gitRoot)).includes('V2'), JSON.stringify(codesOf(engineRun(gitRoot))))
+  writeVerSkill('1.0', '正文 C')
+  check('V1 fails a non-three-part version', codesOf(engineRun(gitRoot)).includes('V1'), JSON.stringify(codesOf(engineRun(gitRoot))))
+  writeVerSkill('0.9.0', '正文 C')
+  check('V2 warns on a downgrade', codesOf(engineRun(gitRoot)).includes('V2'), JSON.stringify(codesOf(engineRun(gitRoot))))
+
+  // 非 git 目录（活跃源技能根的真实形态）必须沉默：静态层拿不到"上一版"，猜就是误报。
+  const nonGitRoot = join(root, 'version-skills-nongit')
+  mkdirSync(join(nonGitRoot, 'ver-demo'), { recursive: true })
+  writeFileSync(join(nonGitRoot, 'ver-demo', 'SKILL.md'), readFileSync(verMd))
+  check(
+    'V2 stays silent outside a git work tree (no false positives)',
+    !codesOf(engineRun(nonGitRoot)).includes('V2'),
+    JSON.stringify(codesOf(engineRun(nonGitRoot))),
   )
 }
 
