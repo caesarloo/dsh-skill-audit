@@ -230,6 +230,12 @@ let out = await postExecute(
 check('next() delegated once', nextCalls === 1, `calls=${nextCalls}`)
 check('context injected for warn-level finding', Array.isArray(out?.additionalContexts) && out.additionalContexts.length === 1, JSON.stringify(out)?.slice(0, 200))
 check('injected message carries the audit header', JSON.stringify(out?.additionalContexts?.[0] ?? {}).includes('技能审核'), JSON.stringify(out?.additionalContexts?.[0] ?? {}).slice(0, 200))
+// 会话 V4 契约：注入消息的 source.kind 必须是生产者自有 kind，'plugin' 会被宿主拒绝写入（turn 失败）。
+check(
+  'injected message source kind is producer-owned (V4 contract)',
+  out?.additionalContexts?.[0]?.source?.kind === 'plugin:tool-skill-audit',
+  JSON.stringify(out?.additionalContexts?.[0]?.source),
+)
 
 console.log('--- 7) post-execute: unrelated write stays silent ---')
 out = await postExecute(

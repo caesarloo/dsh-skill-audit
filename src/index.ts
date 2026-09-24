@@ -561,7 +561,11 @@ export function apply(ctx: Context, config: SkillAuditConfig = {}): void {
       if (typeof llm.createUserMessage !== 'function') return undefined
       return llm.createUserMessage({
         content: [{ type: 'text', text }],
-        source: { kind: 'plugin', plugin: 'tool-skill-audit' },
+        // source.kind 必须是「生产者自有」的 kind：DSH 0.1.7 起的会话 V4 契约拒绝 V3 的
+        // `kind: 'plugin'` 写法（写会话时抛 "format v4 message requires a producer-owned source kind"
+        // → 本轮 turn 直接失败）。'plugin:tool-skill-audit' 与官方 v3→v4 迁移器对本插件历史消息
+        // 的派生结果一致，因此新旧会话都自洽。
+        source: { kind: 'plugin:tool-skill-audit' },
       })
     } catch {
       // dsh-llm 不可用时降级：审核照常执行并留日志，只是不注入上下文

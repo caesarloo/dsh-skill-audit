@@ -139,9 +139,13 @@ function Get-GitTopLevel {
     $top = $null
     try {
         $out = @(& git -C $Root rev-parse --show-toplevel 2>$null)
-        # git 在 Windows 返回正斜杠（C:/x/y）——归一化成反斜杠再比较，否则调用方的
-        # StartsWith 永远不成立、V2 静默失效（2026-09-24 实测踩到）。
-        if ($LASTEXITCODE -eq 0 -and $out.Count -gt 0) { $top = ($out[0].Trim() -replace '/', '\').TrimEnd('\') }
+        # 两处归一化后再比较：① git 在 Windows 返回正斜杠（C:/x/y）→ 转反斜杠；
+        # ② $SkillDir 来自 Resolve-Path，可能是 8.3 短名（C:\Users\<USER>~1\...，用户名超 8 字符时
+        #    必然如此）→ GetFullPath 展开成长名。少任何一步，调用方的 StartsWith 都不成立、
+        #    V2 静默失效（2026-09-24 实测：两类都踩过）。
+        if ($LASTEXITCODE -eq 0 -and $out.Count -gt 0) {
+            $top = ([System.IO.Path]::GetFullPath($out[0].Trim()) -replace '/', '\').TrimEnd('\')
+        }
     }
     catch { $top = $null }
     $script:GitTopCache[$Root] = $top
@@ -154,8 +158,8 @@ function Get-BaselineSkillVersion {
     param([string]$SkillDir, [string]$Root)
     $top = Get-GitTopLevel $Root
     if (-not $top) { return $null }
-    # 两侧都归一化成反斜杠形态再比（$SkillDir 来自 Resolve-Path，已是反斜杠）
-    $dirNorm = $SkillDir.TrimEnd('\', '/') -replace '/', '\'
+    # 两侧都归一化成「反斜杠 + 长名」形态再比（$SkillDir 来自 Resolve-Path，可能是 8.3 短名）
+    $dirNorm = ([System.IO.Path]::GetFullPath($SkillDir) -replace '/', '\').TrimEnd('\')
     if (-not $dirNorm.StartsWith($top, [System.StringComparison]::OrdinalIgnoreCase)) { return $null }
     $rel = $dirNorm.Substring($top.Length).TrimStart('\') -replace '\\', '/'
     $relPath = if ($rel) { "$rel/SKILL.md" } else { 'SKILL.md' }
