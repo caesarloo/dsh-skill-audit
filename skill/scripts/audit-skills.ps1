@@ -7,6 +7,12 @@
     审核项（代码即判据，避免"看着像没问题"）：
       F1  frontmatter 契约：name / description 必填；name 须 kebab-case 且与目录名一致；
           whenToUse 建议存在；version / last_updated 建议存在        → fail / warn
+      F3  frontmatter 转义：**双引号标量**里的 YAML 反斜杠转义合法性。非法转义
+          （如 `\w` `\l` `\d`）会让 DSH 注册技能时整条失败且**无任何提示**——宿主用的是
+          严格 YAML 解析器，非法转义直接丢弃该技能（2026-10-02 实测：两个技能因此从运行时
+          技能目录静默消失，而审核当时报 fail 0 / warn 0）；合法但属控制类的转义
+          （`\f \t \n \r \b \v \0 \a \e \N \_ \L \P`）疑似"忘了转义字面反斜杠"，会让字段值
+          静默变形（如 `%TEMP%\finmeta2026` 里的 `\f` 变成换页符）。字面反斜杠应写 `\\` → fail / warn
       S1  脚本可用性：技能内所有 .ps1 必须是 UTF-8 with BOM，且能被
           PowerShell 5.1 解析（errs=0）—— 无 BOM 的中文脚本在 5.1 下按 GBK
           解码会解析失败                                              → fail
@@ -110,6 +116,64 @@ function Get-FrontmatterField {
     $v = $m.Groups[1].Value.Trim()
     $v = $v.Trim('"').Trim("'")
     return $v
+}
+
+# —— F3 辅助：扫 frontmatter 里的 YAML 双引号标量转义（2026-10-02 新增）——
+# **只认双引号标量**：单引号串与裸标量里反斜杠是字面字符，不需要转义，查它们必误报。
+# 返回每处可疑转义的 { line, seq, illegal }：
+#   illegal=true  —— 该转义在 YAML 规范里不存在。宿主用严格解析器注册技能，遇到它
+#                    会**整条技能注册失败且无任何提示**（2026-10-02 实测踩到）。
+#   illegal=false —— 合法但属控制类字符：能被解析，但字段值**静默变形**，
+#                    通常是把 Windows 路径里的 `\` 忘了转义。
+# 跨行双引号标量受支持（YAML 允许），故状态跨行保持。
+function Get-YamlBadEscapes {
+    param([string]$Frontmatter)
+    $out = @()
+    if (-not $Frontmatter) { return $out }
+    # YAML 1.2 双引号标量允许的转义。**大小写敏感**：`\L \P \N \_` 是大写专用，
+    # 故下面一律用 -ccontains —— PowerShell 的 -contains 默认大小写不敏感，会把非法的
+    # `\l` 误当成合法的 `\L` 放过（2026-10-02 实测踩到这个坑）。
+    $legal   = @('0','a','b','t','n','v','f','r','e',' ','"','/','\','N','_','L','P','x','u','U')
+    $control = @('0','a','b','t','n','v','f','r','e','N','_','L','P')
+    $lines = $Frontmatter -split "`r?`n"
+    $inDouble = $false
+    for ($i = 0; $i -lt $lines.Count; $i++) {
+        $l = $lines[$i]
+        if (-not $inDouble -and $l -match '^\s*#') { continue }
+        $j = 0
+        while ($j -lt $l.Length) {
+            $ch = $l[$j]
+            if (-not $inDouble) {
+                if ($ch -eq '#') { break }
+                if ($ch -eq '"') { $inDouble = $true; $j++; continue }
+                if ($ch -eq "'") {
+                    $j++
+                    while ($j -lt $l.Length) {
+                        if ($l[$j] -eq "'") {
+                            if ($j + 1 -lt $l.Length -and $l[$j + 1] -eq "'") { $j += 2; continue }
+                            $j++; break
+                        }
+                        $j++
+                    }
+                    continue
+                }
+                $j++; continue
+            }
+            if ($ch -eq '\') {
+                if ($j + 1 -ge $l.Length) { $j++; continue }
+                $nxt = [string]$l[$j + 1]
+                $bad = -not ($legal -ccontains $nxt)
+                $sus = (-not $bad) -and ($control -ccontains $nxt)
+                if ($bad -or $sus) {
+                    $out += [pscustomobject]@{ line = ($i + 1); seq = ('\' + $nxt); illegal = [bool]$bad }
+                }
+                $j += 2; continue
+            }
+            if ($ch -eq '"') { $inDouble = $false; $j++; continue }
+            $j++
+        }
+    }
+    return $out
 }
 
 function Test-KebabCase {
@@ -287,7 +351,7 @@ function New-Finding {
 # —— 例外豁免（audit:ignore 标记）——
 # 这不是"放宽判据"：判据强度一律不变（真断裂依旧 fail），只是让**技能自己就地声明**某条判据不适用。
 # 形式（写在 SKILL.md 里）：<!-- audit:ignore <代码> <目标> <理由，至少 8 字符> -->
-#   代码：F1 / S1 / R1 / V1 / V2 / X1 / X2 / X3 之一，或 *（全部）
+#   代码：F1 / F2 / F3 / S1 / R1 / R2 / V1 / V2 / E1 / M1 / X1 / X2 / X3 之一，或 *（全部）
 #         （V1 是 fail 级——fail 一律不可豁免，见 Test-Waived；列出只为说明形态）
 #   目标：R1 用相对引用（references/core.md，斜杠两种写法等价）；其它代码用文件名（SKILL.md 或脚本名）
 # 为什么要它：skill-audit §五 早已要求"误报就在技能正文写明例外与理由"，但此前写了并不生效——
@@ -375,6 +439,21 @@ function Invoke-SkillAudit {
             }
             if (-not $fupd) {
                 [void]$findings.Add((New-Finding 'F1' 'warn' '建议补 last_updated：便于判断内容是否过期' 'SKILL.md'))
+            }
+
+            # —— F3 frontmatter 双引号标量的 YAML 转义合法性 ——
+            # 补的正是 F1 的盲区：F1 用正则取字段值再 Trim('"')，**完全不解析 YAML 转义**，
+            # 于是 `description: "...\new..."` 这类非法转义一路绿灯；而宿主注册技能用的是
+            # 严格 YAML 解析器，遇到非法转义会整条技能注册失败且无任何提示。2026-10-02 实测：
+            # 两个技能因此从运行时技能目录静默消失（`\w` / `\l` / `\d` 各一例），
+            # 而当时本引擎报的是 fail 0 / warn 0 —— 这就是这条判据的存在理由。
+            foreach ($esc in (Get-YamlBadEscapes $fm)) {
+                if ($esc.illegal) {
+                    [void]$findings.Add((New-Finding 'F3' 'fail' "frontmatter 双引号串含非法 YAML 转义 '$($esc.seq)'（frontmatter 第 $($esc.line) 行）：宿主用严格 YAML 解析器注册技能，非法转义会让整条技能注册失败且无任何提示。要表达字面反斜杠请写 \\" 'SKILL.md'))
+                }
+                else {
+                    [void]$findings.Add((New-Finding 'F3' 'warn' "frontmatter 双引号串里的 '$($esc.seq)'（frontmatter 第 $($esc.line) 行）是合法转义但属控制字符：字段值会静默变形，通常是把 Windows 路径里的反斜杠忘了转义。确属本意可加 audit:ignore 豁免，否则请写 \\" 'SKILL.md'))
+                }
             }
 
             # —— V1 版本号格式：一律三段式 主.次.修（缺 version 仍由上面的 F1 报）——
