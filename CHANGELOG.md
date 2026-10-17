@@ -3,6 +3,32 @@
 All notable changes to this package are documented in this file.
 本文件记录本包的重要变更。
 
+## [0.2.8] - 2026-10-17
+
+**DSH 0.2.1 compatibility declaration / DSH 0.2.1 兼容声明**
+
+- Declare `engines.dsh` (`>=0.2.0-rc.2 <0.3.0`) and `dsh.manifestVersion: 1`. Since DSH 0.2.1 the
+  host decides plugin compatibility by `engines.dsh` **first** and ignores `peerDependencies` when
+  it is declared; the plugin manager reads the same fields before installing and refuses an
+  unsatisfied package with `incompatible-version`. Declaring the range makes the accepted host line
+  explicit instead of relying on pre-release matching of peer ranges; `manifestVersion: 1` declares
+  the package-metadata format.
+- No source changes were required for DSH 0.2.1-rc.2 (verified on the 0.2.1-rc.2 desktop host):
+  `skill_audit` runs (29 skills, `fail 0 / warn 0`); the `tools/post-execute` auto-trigger still
+  fires after a skill write and injects findings as context; `ctx.skills.register` still exposes the
+  bundled skill; the `ctx.subprocess.spawn` → `handle.done` → `collected.*.readFrom(0).text` chain is
+  unchanged; and `createUserMessage` with `source.kind: 'plugin:tool-skill-audit'` still satisfies
+  the session-format-v4 producer-owned source-kind rule.
+- 声明 `engines.dsh`（`>=0.2.0-rc.2 <0.3.0`）与 `dsh.manifestVersion: 1`。DSH 0.2.1 起宿主**优先按
+  `engines.dsh` 判定**插件兼容性，声明了该字段就忽略 `peerDependencies`；插件管理器在安装前也读
+  这两个字段，不满足时报 `incompatible-version`。把可接受的宿主线显式化，不再依赖 peer 范围的
+  「预发布参与匹配」语义；`manifestVersion: 1` 声明包元数据格式。
+- 0.2.1-rc.2 下**无需改动代码**（已在桌面端 0.2.1-rc.2 实测）：`skill_audit` 正常（29 技能
+  `fail 0 / warn 0`）；技能写入后 `tools/post-execute` 自动触发仍生效并把结论注入上下文；
+  `ctx.skills.register` 仍能注册包内技能；`ctx.subprocess.spawn` → `handle.done` →
+  `collected.*.readFrom(0).text` 链路不变；`createUserMessage` 配合
+  `source.kind: 'plugin:tool-skill-audit'` 仍满足会话格式 v4 的 producer-owned source kind 规则。
+
 ## [0.2.7] - 2026-10-02
 
 **New criterion F3: YAML escapes in frontmatter / 新增判据 F3：frontmatter 的 YAML 转义**
