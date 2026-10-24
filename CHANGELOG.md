@@ -3,6 +3,34 @@
 All notable changes to this package are documented in this file.
 本文件记录本包的重要变更。
 
+## [0.2.9] - 2026-10-24
+
+**DSH 0.2.1-rc.3 re-verification / DSH 0.2.1-rc.3 复验**
+
+- Re-verified on the DSH 0.2.1-rc.3 desktop host: **no code changes were required**. `skill_audit`
+  passes the whole skill set (43 skills, `fail 0 / warn 0`); the `tools/post-execute` auto-trigger
+  still fires after skill writes and injects findings as context; `ctx.skills.register` still
+  registers the bundled skill; the `ctx.subprocess.spawn` → `handle.done` →
+  `collected.*.readFrom(0).text` chain is unchanged; `createUserMessage` with
+  `source.kind: 'plugin:tool-skill-audit'` still satisfies the session-format-v4 rule.
+- `engines.dsh` stays `>=0.2.0-rc.2 <0.3.0`. The README compatibility sections now name the
+  verified runtime and spell out two things: the upper bound intentionally rejects a future DSH 0.3
+  until this plugin is re-verified and republished, and an out-of-range host can be run with the
+  plugin manager's **exact-version exemption** (stored in `profiles/<profile>/compatibility.json`)
+  instead of editing the range. The README install/verify commands no longer hardcode the retired
+  CLI `web` profile; they now show the profile-agnostic form and the desktop shape (Plugin page /
+  bundled CLI).
+- 已在 DSH 0.2.1-rc.3 桌面端复验：**无需改动代码**。`skill_audit` 全量通过（43 个技能 `fail 0 /
+  warn 0`）；技能写入后 `tools/post-execute` 自动触发、结论注入上下文仍生效；`ctx.skills.register`
+  仍能注册包内技能；`ctx.subprocess.spawn` → `handle.done` → `collected.*.readFrom(0).text` 链路
+  不变；`createUserMessage` 配合 `source.kind: 'plugin:tool-skill-audit'` 仍满足会话格式 v4 规则。
+- `engines.dsh` 保持 `>=0.2.0-rc.2 <0.3.0`。README 兼容段改为写明已验证的运行时，并讲清两点：
+  上界会在 DSH 0.3 到来时**有意拒绝**，待本插件重新复验并发布新版后再放宽；若确实要在范围外的
+  宿主上运行，用插件管理器的**精确版本豁免**（记录在 `profiles/<profile>/compatibility.json`），
+  不要改版本范围。
+- README 的安装/验证命令不再写死已退役的 CLI `web` profile：改为与 profile 无关的写法，并补充
+  桌面端形态（插件页 / 桌面端自带 CLI）。
+
 ## [0.2.8] - 2026-10-17
 
 **DSH 0.2.1 compatibility declaration / DSH 0.2.1 兼容声明**

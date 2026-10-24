@@ -20,16 +20,23 @@ The audit rules live in the `skill-audit` skill's engine: frontmatter contract (
 ### Install
 
 ```sh
-dsh plugin --profile web add @caesarloo/dsh-skill-audit
+dsh plugin --profile <profile> add @caesarloo/dsh-skill-audit
 ```
+
+On the desktop app the recommended path is the **Plugin page**; the managed `desktop` profile is
+owned by the Electron application, so use the app's own CLI (or the Plugin page) to install or
+inspect it. From a local checkout, install by directory: `dsh plugin --profile <profile> add <project-directory>`.
 
 **No prerequisite** — the package ships the audit engine *and* the skill body, so a bare install is enough. If your skills root already holds a full `skill-audit` skill, the plugin leaves it alone and uses that one instead.
 
-Restart dsh afterwards (bundle-level change, not hot-reloaded). Verify:
+Restart DSH afterwards (bundle-layer change, not hot-reloaded). Verify — CLI shape:
 
 ```powershell
-dsh --profile web --dump-config | Select-String tool-skill-audit
+dsh --profile <profile> --dump-config | Select-String tool-skill-audit
 ```
+
+On the desktop app `--dump-config` is refused for the managed profile; verify with the bundled CLI:
+`plugin --profile <profile> list --depth 0`.
 
 ### Engine resolution
 
@@ -103,8 +110,9 @@ The **skills service** is a different kind of dependency: a service of the host 
 
 ### DSH version compatibility
 
-- `engines.dsh` is declared as `>=0.2.0-rc.2 <0.3.0`: verified against DSH 0.2.1-rc.2, staying on the 0.2.x host line. DSH 0.2.1+ prefers this field over `peerDependencies` (which is then ignored), and the plugin manager refuses installs that do not satisfy it with `incompatible-version`.
+- `engines.dsh` is declared as `>=0.2.0-rc.2 <0.3.0`: re-verified against DSH **0.2.1-rc.3** (2026-10-24), staying on the 0.2.x host line. DSH 0.2.1+ prefers this field over `peerDependencies` (which is then ignored), and the plugin manager refuses installs that do not satisfy it with `incompatible-version`.
 - `dsh.manifestVersion` is `1`, the declared package-metadata format.
+- The upper bound is intentional: a future DSH 0.3 is rejected until this plugin is re-verified and republished. If you must run an out-of-range host before that, grant the plugin manager's **exact-version exemption** (the profile's `compatibility.json`) instead of editing the range.
 
 ### Boundaries
 
@@ -146,16 +154,22 @@ MIT
 ### 安装
 
 ```sh
-dsh plugin --profile web add @caesarloo/dsh-skill-audit
+dsh plugin --profile <profile> add @caesarloo/dsh-skill-audit
 ```
+
+桌面端推荐走**插件页**安装；受管的 `desktop` profile 由 Electron 应用独占管理，请用应用自带 CLI
+（或插件页）安装与查看。本地检出目录安装：`dsh plugin --profile <profile> add <项目目录>`。
 
 **无前置条件** —— 包内自带审核引擎与技能正文，装上即可用。若你的技能根里已有完整的 `skill-audit` 技能，插件不打扰它、直接用你那份。
 
-装完**重启 dsh**（插件属于 bundle 层变更，不随热重载生效）。验证：
+装完**重启 DSH**（插件属于 bundle 层变更，不随热重载生效）。验证——CLI 形态：
 
 ```powershell
-dsh --profile web --dump-config | Select-String tool-skill-audit
+dsh --profile <profile> --dump-config | Select-String tool-skill-audit
 ```
+
+桌面端对受管 profile 会拒绝 `--dump-config`；请用桌面端自带 CLI 确认：
+`plugin --profile <profile> list --depth 0`。
 
 ### 引擎解析顺序
 
@@ -229,8 +243,9 @@ skill_audit({ skill: 'a,b' })    # 只审指定技能（逗号分隔）
 
 ### DSH 版本兼容
 
-- `engines.dsh` 声明为 `>=0.2.0-rc.2 <0.3.0`：已在 DSH 0.2.1-rc.2 上验证，支持面保持在 0.2.x 宿主线。DSH 0.2.1 起宿主**优先按该字段判定**（声明后忽略 `peerDependencies`），插件管理器安装前也按它校验，不满足时报 `incompatible-version`。
+- `engines.dsh` 声明为 `>=0.2.0-rc.2 <0.3.0`：已在 DSH **0.2.1-rc.3**（2026-10-24 复验）上验证，支持面保持在 0.2.x 宿主线。DSH 0.2.1 起宿主**优先按该字段判定**（声明后忽略 `peerDependencies`），插件管理器安装前也按它校验，不满足时报 `incompatible-version`。
 - `dsh.manifestVersion` 为 `1`，声明的包元数据格式。
+- 上界是刻意的：DSH 0.3 会被**有意拒绝**，直到本插件重新复验并发新版。确需在范围外宿主上先跑，请用插件管理器的**精确版本豁免**（profile 的 `compatibility.json`），不要改这里的范围。
 
 ### 边界（明确不做）
 
