@@ -110,7 +110,7 @@ The **skills service** is a different kind of dependency: a service of the host 
 
 ### DSH version compatibility
 
-- `engines.dsh` is declared as `>=0.2.0-rc.2 <0.3.0`: re-verified against DSH **0.2.1-rc.3** (2026-10-24), staying on the 0.2.x host line. DSH 0.2.1+ prefers this field over `peerDependencies` (which is then ignored), and the plugin manager refuses installs that do not satisfy it with `incompatible-version`.
+- `engines.dsh` is declared as `>=0.2.0-rc.2 <0.3.0`: re-verified against DSH **0.2.1-rc.5** (2026-10-30), staying on the 0.2.x host line. DSH 0.2.1+ prefers this field over `peerDependencies` (which is then ignored), and the plugin manager refuses installs that do not satisfy it with `incompatible-version`.
 - `dsh.manifestVersion` is `1`, the declared package-metadata format.
 - The upper bound is intentional: a future DSH 0.3 is rejected until this plugin is re-verified and republished. If you must run an out-of-range host before that, grant the plugin manager's **exact-version exemption** (the profile's `compatibility.json`) instead of editing the range.
 
@@ -243,7 +243,7 @@ skill_audit({ skill: 'a,b' })    # 只审指定技能（逗号分隔）
 
 ### DSH 版本兼容
 
-- `engines.dsh` 声明为 `>=0.2.0-rc.2 <0.3.0`：已在 DSH **0.2.1-rc.3**（2026-10-24 复验）上验证，支持面保持在 0.2.x 宿主线。DSH 0.2.1 起宿主**优先按该字段判定**（声明后忽略 `peerDependencies`），插件管理器安装前也按它校验，不满足时报 `incompatible-version`。
+- `engines.dsh` 声明为 `>=0.2.0-rc.2 <0.3.0`：已在 DSH **0.2.1-rc.5**（2026-10-30 复验）上验证，支持面保持在 0.2.x 宿主线。DSH 0.2.1 起宿主**优先按该字段判定**（声明后忽略 `peerDependencies`），插件管理器安装前也按它校验，不满足时报 `incompatible-version`。
 - `dsh.manifestVersion` 为 `1`，声明的包元数据格式。
 - 上界是刻意的：DSH 0.3 会被**有意拒绝**，直到本插件重新复验并发新版。确需在范围外宿主上先跑，请用插件管理器的**精确版本豁免**（profile 的 `compatibility.json`），不要改这里的范围。
 

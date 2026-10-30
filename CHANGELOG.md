@@ -3,6 +3,28 @@
 All notable changes to this package are documented in this file.
 本文件记录本包的重要变更。
 
+## [0.2.10] - 2026-10-30
+
+**Fix the self-triggered leak gate and build before tests / 修掉自身泄漏闸门误报，测试前先构建**
+
+- The F3 note in `skill/scripts/audit-skills.ps1` used `%TEMP%\finmeta2026` as its YAML-escape example. That word is a
+  machine-specific temp-directory convention (it matches the local-only rule in `.leak-patterns.local`), so the package's
+  own `check-leaks` flagged itself: `npm test` and `prepublishOnly` were both blocked. The example is now the neutral
+  `%TEMP%\foo` (still demonstrating that `\f` becomes a form feed); the rule logic is unchanged.
+- Added `pretest: npm run build`, so `npm test` exercises the freshly built `dist/` instead of a possibly stale one.
+- Re-verified on the DSH **0.2.1-rc.5** desktop host (2026-10-30): `skill_audit` passes the whole skill set (47 skills,
+  `fail 0 / warn 0`); the `tools/post-execute` auto-trigger, `ctx.subprocess.spawn` → handle chain,
+  `ctx.skills.register` and `createUserMessage` behave as before. The plugin-facing contract surface is byte-identical
+  between 0.2.1-rc.3 and rc.5, so this release carries no runtime change.
+
+- `skill/scripts/audit-skills.ps1` 的 F3 说明里，YAML 转义示例原本写成 `%TEMP%\finmeta2026`。该词是本机临时目录
+  约定名（命中 `.leak-patterns.local` 的本机专属规则），于是本包**自己审出自己**：`check-leaks` 报命中、`npm test`
+  与 `prepublishOnly` 双双被拦。现改为中性示例 `%TEMP%\foo`（仍演示 `\f` 变成换页符），判据逻辑不变。
+- 新增 `pretest: npm run build`：`npm test` 现在测的是刚构建的 `dist/`，避免"改了 src 没重建、测的是旧产物"。
+- 已在 DSH **0.2.1-rc.5** 桌面端复验（2026-10-30）：`skill_audit` 全量 47 个技能 `fail 0 / warn 0`；
+  `tools/post-execute` 自动触发、`ctx.subprocess.spawn` → handle 链路、`ctx.skills.register`、`createUserMessage`
+  均与复验时一致；0.2.1-rc.3 → rc.5 之间插件契约面逐字节零变化，本版无运行时功能变更。
+
 ## [0.2.9] - 2026-10-24
 
 **DSH 0.2.1-rc.3 re-verification / DSH 0.2.1-rc.3 复验**
