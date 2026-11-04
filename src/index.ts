@@ -69,6 +69,10 @@ const STDERR_MAX_BYTES = 256 * 1024
 const GRACE_MS = 3000
 const DEFAULT_TIMEOUT_MS = 120000
 const DEFAULT_MAX_CONTEXT_CHARS = 2000
+/** 自动备份去抖（写入连续发生时的合并窗口）。 */
+const DEFAULT_AUTO_BACKUP_DEBOUNCE_MS = 10000
+/** 包内/用户态执行器脚本文件名（与 skill/scripts 下一致）。 */
+const AUTO_BACKUP_SCRIPT_NAME = 'auto-backup-skills.ps1'
 
 export interface SkillAuditConfig {
   /**
@@ -93,6 +97,33 @@ export interface SkillAuditConfig {
    * 才需要在这里补上工具名。
    */
   fullAuditTools?: string[]
+  /**
+   * 审核通过后**自动备份**：把 live 技能同步进备份仓并提交（默认不做，行为不变）。
+   * 配了对象即启用；`failure` 场景（fail ≠ 0）绝不入库。
+   */
+  autoBackup?: AutoBackupConfig | false
+}
+
+/**
+ * 自动备份配置。执行器是一个一次性 PowerShell 脚本（跑完即退出，**不是常驻进程**）：
+ * 它扫 live 技能根与备份仓的差异 → 复制 → 调 commit-repo.ps1 提交（闸门 E/F 照常生效）。
+ * 插件只负责"审核通过后、去抖到点触发它一次"。
+ */
+export interface AutoBackupConfig {
+  /** 显式关闭。缺省 true。 */
+  enabled?: boolean
+  /** 备份仓工作副本根；缺省由执行器自行现测（环境变量 / 活动 profile 的 patch 配置）。 */
+  repoDir?: string
+  /**
+   * 执行器脚本路径。缺省依次尝试：
+   * ① 包内 `skill/scripts/auto-backup-skills.ps1`（随 npm 包发布）
+   * ② `<skillsRoot>/skill-audit-ops/scripts/auto-backup-skills.ps1`（用户态覆盖位）
+   */
+  scriptPath?: string
+  /** 去抖毫秒数（写文件事件连续触发时合并成一次），缺省 10000。 */
+  debounceMs?: number
+  /** 是否推送远端；缺省 true（跟随执行器默认）。 */
+  push?: boolean
 }
 
 interface Finding {
@@ -419,6 +450,90 @@ export function apply(ctx: Context, config: SkillAuditConfig = {}): void {
       : DEFAULT_MAX_CONTEXT_CHARS
   const fullAuditTools = Array.isArray(config.fullAuditTools) ? config.fullAuditTools : []
 
+  // ---------- 审核通过 → 自动备份（2026-11-05 新增，事件驱动，非常驻） ----------
+  const autoBackupCfg =
+    config.autoBackup === false || !config.autoBackup ? null : config.autoBackup
+  const autoBackupEnabled = !!autoBackupCfg && autoBackupCfg.enabled !== false
+  const autoBackupDebounceMs =
+    typeof autoBackupCfg?.debounceMs === 'number' && autoBackupCfg.debounceMs >= 0
+      ? autoBackupCfg.debounceMs
+      : DEFAULT_AUTO_BACKUP_DEBOUNCE_MS
+  const autoBackupPush = autoBackupCfg?.push !== false
+  let autoBackupTimer: ReturnType<typeof setTimeout> | null = null
+  let autoBackupRunning = false
+
+  const logAutoBackup = (level: 'info' | 'warn', message: string): void => {
+    try {
+      if (level === 'warn') ctx.logger.warn(message)
+      else ctx.logger.info(message)
+    } catch {
+      /* 日志失败不影响任何流程 */
+    }
+  }
+
+  /** 解析执行器：配置显式 → 包内副本 → live 技能里的那份。都找不到返回 null（静默降级）。 */
+  function resolveAutoBackupScript(): string | null {
+    const explicit = autoBackupCfg?.scriptPath
+    if (explicit) return existsSync(explicit) ? explicit : null
+    const candidates: string[] = []
+    if (bundledSkillDir) candidates.push(join(bundledSkillDir, 'scripts', AUTO_BACKUP_SCRIPT_NAME))
+    candidates.push(join(skillsRoot, 'skill-audit-ops', 'scripts', AUTO_BACKUP_SCRIPT_NAME))
+    for (const c of candidates) {
+      if (existsSync(c)) return c
+    }
+    return null
+  }
+
+  async function runAutoBackup(scope: string, signal?: AbortSignal): Promise<void> {
+    if (autoBackupRunning) {
+      logAutoBackup('info', '[tool-skill-audit] autoBackup 上一轮仍在执行，跳过本轮')
+      return
+    }
+    const script = resolveAutoBackupScript()
+    if (!script) {
+      logAutoBackup('warn', '[tool-skill-audit] autoBackup 已启用但找不到执行器脚本，已跳过')
+      return
+    }
+    autoBackupRunning = true
+    try {
+      const argv = [powershell, '-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', script, '-Once']
+      if (autoBackupCfg?.repoDir) argv.push('-RepoRoot', autoBackupCfg.repoDir)
+      if (!autoBackupPush) argv.push('-NoPush')
+      const handle = ctx.subprocess.spawn({
+        argv,
+        cwd: skillsRoot,
+        stdio: {
+          stdin: 'ignore',
+          stdout: { maxBytes: 512 * 1024 },
+          stderr: { maxBytes: 128 * 1024 },
+        },
+        graceMs: 3000,
+        signal,
+      })
+      const outcome = await handle.done
+      const stdout = handle.collected.stdout?.readFrom(0)?.text ?? ''
+      const m = stdout.match(/本轮结束：([A-Z][A-Z-]*)/)
+      const code = m ? m[1] : '(未解析)'
+      logAutoBackup(
+        'info',
+        `[tool-skill-audit] autoBackup 完成（${scope}）：${code}${outcome.exitCode === 0 ? '' : ` exit=${outcome.exitCode}`}`,
+      )
+    } catch (e) {
+      // 自动备份永远不能影响工具调用本身
+      logAutoBackup('warn', `[tool-skill-audit] autoBackup 异常（已忽略）：${(e as Error)?.message ?? String(e)}`)
+    } finally {
+      autoBackupRunning = false
+    }
+  }
+
+  function scheduleAutoBackup(scope: string, signal?: AbortSignal): void {
+    if (autoBackupTimer) clearTimeout(autoBackupTimer)
+    autoBackupTimer = setTimeout(() => {
+      autoBackupTimer = null
+      void runAutoBackup(scope, signal)
+    }, autoBackupDebounceMs)
+  }
+
   async function runAudit(skills: string[] | null, signal?: AbortSignal): Promise<RunOutcome> {
     if (!(await fileExists(auditScript))) {
       return { exitCode: -1, stdout: '', stderr: `审核脚本不存在: ${auditScript}` }
@@ -653,6 +768,11 @@ export function apply(ctx: Context, config: SkillAuditConfig = {}): void {
 
           const run = await runAudit(plan.skills, exec?.signal)
           const report = run.exitCode === -1 ? null : parseReport(run.stdout)
+          // 审核通过（报告可解析且 fail = 0）→ 去抖后自动备份；fail ≠ 0 一律不入库。
+          // 刻意不传 exec.signal：备份是后置的独立动作，不该因为那次工具调用结束而被取消。
+          if (autoBackupEnabled && report && (report.fail ?? 0) === 0) {
+            scheduleAutoBackup(plan.scope)
+          }
           const context = report
             ? await buildContextMessage(report, plan.scope, plan.skills === null)
             : undefined

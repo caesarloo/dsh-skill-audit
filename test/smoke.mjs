@@ -513,6 +513,100 @@ console.log('--- 13) apply() reports which engine won ---')
   check('tool still registered without an explicit auditScript', liveTool?.name === 'skill_audit', String(liveTool?.name))
 }
 
+console.log('--- 14) autoBackup: 审核通过才触发、去抖合并、失败不触发 ---')
+{
+  const sleep = (ms) => new Promise((r) => setTimeout(r, ms))
+  const marker = join(root, 'auto-backup-calls.txt')
+  const fakeScript = join(root, 'fake-auto-backup.ps1')
+  // 假执行器：被调用就往标记文件追加一行（路径用单引号包，避免 PS 解析反斜杠）
+  writeFileSync(fakeScript, `Add-Content -LiteralPath '${marker.replace(/'/g, "''")}' -Value 'called'\r\n`, 'utf8')
+
+  const calls = []
+  const mkCtx = (handlerRef) => ({
+    ...ctx,
+    tools: { register: () => {} },
+    logger: { info: () => {}, warn: () => {} },
+    on: (_e, fn) => { handlerRef.fn = fn },
+    subprocess: {
+      spawn(opts) {
+        calls.push(opts.argv)
+        return ctx.subprocess.spawn(opts)
+      },
+    },
+  })
+
+  // a) 审核通过（demo-warn 只有 warn）→ 触发一次；连续两次写合并
+  {
+    const ref = {}
+    apply(mkCtx(ref), { skillsRoot, auditScript, powershell: PS, autoBackup: { scriptPath: fakeScript, debounceMs: 0 } })
+    const fire = (skill) =>
+      ref.fn(
+        { name: 'write', arguments: { file_path: join(skillsRoot, skill, 'SKILL.md') }, signal: exec.signal },
+        { content: [] },
+        nextReturning({ kind: 'enter' }),
+      )
+    await fire('demo-warn')
+    await sleep(800)
+    const lines = existsSync(marker) ? readFileSync(marker, 'utf8').trim().split(/\r?\n/).filter(Boolean) : []
+    check('审核通过后执行器被调用一次', lines.length === 1, `lines=${lines.length}`)
+    const backupCall = calls.find((a) => a.some((x) => String(x).includes('fake-auto-backup.ps1')))
+    check('执行器收到 -Once', !!backupCall && backupCall.includes('-Once'), JSON.stringify(backupCall))
+    check(
+      '执行器以 PowerShell 启动',
+      !!backupCall && /powershell/i.test(String(backupCall[0])),
+      JSON.stringify(backupCall && backupCall[0]),
+    )
+  }
+
+  // b) 审核 fail（demo-bad）→ 不触发
+  {
+    const before = calls.length
+    const ref = {}
+    apply(mkCtx(ref), { skillsRoot, auditScript, powershell: PS, autoBackup: { scriptPath: fakeScript, debounceMs: 0 } })
+    await ref.fn(
+      { name: 'write', arguments: { file_path: join(skillsRoot, 'demo-bad', 'SKILL.md') }, signal: exec.signal },
+      { content: [] },
+      nextReturning({ kind: 'enter' }),
+    )
+    await sleep(800)
+    const backupCalls = calls.slice(before).filter((a) => a.some((x) => String(x).includes('fake-auto-backup.ps1')))
+    check('审核 fail ≠ 0 时不触发备份', backupCalls.length === 0, JSON.stringify(backupCalls))
+  }
+
+  // c) 不配置 autoBackup → 不触发（默认行为不变）
+  {
+    const before = calls.length
+    const ref = {}
+    apply(mkCtx(ref), { skillsRoot, auditScript, powershell: PS })
+    await ref.fn(
+      { name: 'write', arguments: { file_path: join(skillsRoot, 'demo-warn', 'SKILL.md') }, signal: exec.signal },
+      { content: [] },
+      nextReturning({ kind: 'enter' }),
+    )
+    await sleep(400)
+    const backupCalls = calls.slice(before).filter((a) => a.some((x) => String(x).includes('auto-backup-skills.ps1')))
+    check('未配置 autoBackup → 不触发', backupCalls.length === 0, JSON.stringify(backupCalls))
+  }
+
+  // d) 执行器路径不存在 → 静默降级，不影响工具调用
+  {
+    const ref = {}
+    apply(mkCtx(ref), {
+      skillsRoot,
+      auditScript,
+      powershell: PS,
+      autoBackup: { scriptPath: join(root, 'no-such-backup.ps1'), debounceMs: 0 },
+    })
+    const out = await ref.fn(
+      { name: 'write', arguments: { file_path: join(skillsRoot, 'demo-warn', 'SKILL.md') }, signal: exec.signal },
+      { content: [] },
+      nextReturning({ kind: 'enter' }),
+    )
+    await sleep(400)
+    check('执行器缺失时工具调用照常返回', typeof out === 'object', JSON.stringify(out)?.slice(0, 120))
+  }
+}
+
 rmSync(root, { recursive: true, force: true })
 console.log('')
 console.log(failures === 0 ? 'ALL SMOKE TESTS PASSED' : `FAILED CHECKS: ${failures}`)

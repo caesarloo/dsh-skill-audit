@@ -3,6 +3,32 @@
 All notable changes to this package are documented in this file.
 本文件记录本包的重要变更。
 
+## [0.3.0] - 2026-11-05
+
+**Audit-then-backup: commit skills only after a clean audit / 审核通过后自动入库，不再需要常驻进程**
+
+- New `autoBackup` option (off by default). When enabled, an automatic `tools/post-execute` audit that ends with
+  `fail = 0` schedules a one-shot `skill/scripts/auto-backup-skills.ps1` run (debounced, default 10 s). The script
+  diffs the live skills root against the backup repo, copies what changed, and commits through `commit-repo.ps1` —
+  so gate E (skill must be named in the message) and gate F (content changed ⇒ version must be bumped) still apply.
+  Nothing is resident: the child process exits after each round.
+- Fail-closed: `fail > 0` never triggers a backup, and an unparsable audit report never does either.
+- `debounceMs: 0` is honoured as "run immediately" (used by the smoke test); a missing value falls back to 10 s.
+- Executor resolution: `config.autoBackup.scriptPath` → bundled `skill/scripts/auto-backup-skills.ps1` →
+  `<skillsRoot>/skill-audit-ops/scripts/auto-backup-skills.ps1`. Missing executor = silent no-op plus a log line.
+- Smoke test section 14 covers: triggers once on a clean audit, passes `-Once`, stays silent on `fail > 0`,
+  stays silent when unconfigured, and survives a missing executor.
+- Desktop hosts: the profile patch layer does **not** hot-load a *new* `insert` entry — restart DSH to pick the plugin up.
+
+- 新增 `autoBackup` 选项（默认关闭）。开启后，`tools/post-execute` 自动审核以 `fail = 0` 结束时，去抖（默认 10 秒）
+  跑一次包内 `skill/scripts/auto-backup-skills.ps1`：对比 live 技能根与备份仓、复制差异、经 `commit-repo.ps1` 提交——
+  因此闸门 E（提交信息必须点名技能）与闸门 F（内容改了版本号必须升）照常生效。**不是常驻进程**，每轮跑完即退出。
+- fail-closed：`fail > 0` 不触发；审核报告解析不出来也不触发。
+- `debounceMs: 0` 现在表示"立即执行"（冒烟测试用）；缺省回落 10 秒。
+- 执行器解析顺序：`config.autoBackup.scriptPath` → 包内 `skill/scripts/auto-backup-skills.ps1` →
+  `<skillsRoot>/skill-audit-ops/scripts/auto-backup-skills.ps1`；都找不到则静默跳过并记一行日志。
+- 冒烟测试第 14 节覆盖：清洁审核触发一次、带 `-Once`、`fail > 0` 不触发、未配置不触发、执行器缺失不崩。
+- 桌面端提示：profile 的 patch 层**不会**热装载**新增**的 `insert` 条目——要重启 DSH 才生效。
 ## [0.2.10] - 2026-10-30
 
 **Fix the self-triggered leak gate and build before tests / 修掉自身泄漏闸门误报，测试前先构建**

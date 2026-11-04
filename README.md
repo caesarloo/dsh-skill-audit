@@ -101,6 +101,7 @@ Usually none. To customize, add `config` to the entry in the profile's `cordis.p
 | `timeoutMs` | `120000` | Per-audit timeout |
 | `maxContextChars` | `2000` | Cap on injected context length |
 | `fullAuditTools` | `[]` | Extra tool names to treat as bulk rewrites of the skills tree. Usually unnecessary: the generic rule already covers calls whose `mode` is `restore` or `backup`. |
+| `autoBackup` | `off` | Enable **audit-then-backup**: after an audit with `fail = 0`, run the one-shot `skill/scripts/auto-backup-skills.ps1` (debounced, default 10 s) to sync the touched skills into the backup repo and commit — **no resident process**. Accepts `{ scriptPath?, repoDir?, debounceMs?, push? }`. Fail ≠ 0 never triggers it. |
 
 ### Dependencies
 
@@ -234,6 +235,7 @@ skill_audit({ skill: 'a,b' })    # 只审指定技能（逗号分隔）
 | `timeoutMs` | `120000` | 单次审核超时 |
 | `maxContextChars` | `2000` | 回传上下文的字符上限 |
 | `fullAuditTools` | `[]` | 额外视为「整批改写技能目录」的工具名。通常不需要：通用规则已覆盖 `mode` 为 `restore` / `backup` 的调用。 |
+| `autoBackup` | 关闭 | 开启「**审核通过后自动备份**」：审核 `fail = 0` 时去抖（默认 10 秒）跑一次包内 `skill/scripts/auto-backup-skills.ps1`（一次性进程，**非常驻**），把有差异的技能同步进备份仓并提交；可配 `{ scriptPath?, repoDir?, debounceMs?, push? }`。`fail ≠ 0` 永不触发。 |
 
 ### 依赖约定
 
