@@ -513,7 +513,7 @@ console.log('--- 13) apply() reports which engine won ---')
   check('tool still registered without an explicit auditScript', liveTool?.name === 'skill_audit', String(liveTool?.name))
 }
 
-console.log('--- 14) autoBackup: 审核通过才触发、去抖合并、失败不触发 ---')
+console.log('--- 14) autoBackup: 审核通过才触发、await 到跑完、失败不触发 ---')
 {
   const sleep = (ms) => new Promise((r) => setTimeout(r, ms))
   const marker = join(root, 'auto-backup-calls.txt')
@@ -535,7 +535,7 @@ console.log('--- 14) autoBackup: 审核通过才触发、去抖合并、失败�
     },
   })
 
-  // a) 审核通过（demo-warn 只有 warn）→ 触发一次；连续两次写合并
+  // a) 审核通过（demo-warn 只有 warn）→ 触发一次；handler 返回时备份已跑完（证明是 await 的）
   {
     const ref = {}
     apply(mkCtx(ref), { skillsRoot, auditScript, powershell: PS, autoBackup: { scriptPath: fakeScript, debounceMs: 0 } })
@@ -546,7 +546,10 @@ console.log('--- 14) autoBackup: 审核通过才触发、去抖合并、失败�
         nextReturning({ kind: 'enter' }),
       )
     await fire('demo-warn')
-    await sleep(800)
+    // 不 sleep：0.3.1 修复的就是"handler 返回时备份还没跑完，宿主随后把子进程静默取消"——这里必须立刻可见
+    const linesImmediately = existsSync(marker) ? readFileSync(marker, 'utf8').trim().split(/\r?\n/).filter(Boolean) : []
+    check('handler 返回时执行器已完成（await 生效）', linesImmediately.length === 1, `lines=${linesImmediately.length}`)
+    await sleep(400)
     const lines = existsSync(marker) ? readFileSync(marker, 'utf8').trim().split(/\r?\n/).filter(Boolean) : []
     check('审核通过后执行器被调用一次', lines.length === 1, `lines=${lines.length}`)
     const backupCall = calls.find((a) => a.some((x) => String(x).includes('fake-auto-backup.ps1')))

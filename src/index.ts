@@ -460,6 +460,8 @@ export function apply(ctx: Context, config: SkillAuditConfig = {}): void {
       : DEFAULT_AUTO_BACKUP_DEBOUNCE_MS
   const autoBackupPush = autoBackupCfg?.push !== false
   let autoBackupTimer: ReturnType<typeof setTimeout> | null = null
+  // 去抖合并用：被后一次调用合并掉的那一轮，通过它立刻返回（备份由后一次统一跑）。
+  let autoBackupWaiting: (() => void) | null = null
   let autoBackupRunning = false
 
   const logAutoBackup = (level: 'info' | 'warn', message: string): void => {
@@ -526,12 +528,37 @@ export function apply(ctx: Context, config: SkillAuditConfig = {}): void {
     }
   }
 
-  function scheduleAutoBackup(scope: string, signal?: AbortSignal): void {
-    if (autoBackupTimer) clearTimeout(autoBackupTimer)
-    autoBackupTimer = setTimeout(() => {
+  /**
+   * 去抖后**等这一轮备份跑完**再返回。
+   *
+   * 为什么必须 await（2026-11-05 桌面端实测）：宿主在工具调用返回之后，会把「没有 await 的子进程」
+   * 静默取消——不报错、不留日志、连进程都不启动。同一个 `post-execute` 回调、同一个 `ctx.subprocess`，
+   * 审核那条因为 await 到进程结束每次都正常，备份那条 `void runAutoBackup(...)` 发起即返回就从不启动
+   * （三个对照实验只差 await 这一个变量）。代价＝那次工具调用多等 debounceMs ＋ 执行器时长（约 15–20 秒）。
+   *
+   * 仍然刻意不传 `exec.signal`：备份是后置的独立动作，不该因为那次工具调用被取消而中断。
+   * 去抖合并时，先到的那一轮直接返回（`autoBackupWaiting` 置空），备份由后一次统一跑，避免重复执行。
+   */
+  async function scheduleAutoBackup(scope: string): Promise<void> {
+    if (autoBackupWaiting) {
+      const cancel = autoBackupWaiting
+      autoBackupWaiting = null
+      cancel()
+    }
+    if (autoBackupTimer) {
+      clearTimeout(autoBackupTimer)
       autoBackupTimer = null
-      void runAutoBackup(scope, signal)
-    }, autoBackupDebounceMs)
+    }
+    const mine = await new Promise<boolean>((resolve) => {
+      autoBackupWaiting = () => resolve(false)
+      autoBackupTimer = setTimeout(() => {
+        autoBackupTimer = null
+        autoBackupWaiting = null
+        resolve(true)
+      }, autoBackupDebounceMs)
+    })
+    if (!mine) return
+    await runAutoBackup(scope)
   }
 
   async function runAudit(skills: string[] | null, signal?: AbortSignal): Promise<RunOutcome> {
@@ -769,9 +796,9 @@ export function apply(ctx: Context, config: SkillAuditConfig = {}): void {
           const run = await runAudit(plan.skills, exec?.signal)
           const report = run.exitCode === -1 ? null : parseReport(run.stdout)
           // 审核通过（报告可解析且 fail = 0）→ 去抖后自动备份；fail ≠ 0 一律不入库。
-          // 刻意不传 exec.signal：备份是后置的独立动作，不该因为那次工具调用结束而被取消。
+          // 必须 await：桌面端宿主会静默取消「工具调用返回时还没 await 完的子进程」，详见 scheduleAutoBackup。
           if (autoBackupEnabled && report && (report.fail ?? 0) === 0) {
-            scheduleAutoBackup(plan.scope)
+            await scheduleAutoBackup(plan.scope)
           }
           const context = report
             ? await buildContextMessage(report, plan.scope, plan.skills === null)

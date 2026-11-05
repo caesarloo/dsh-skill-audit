@@ -3,6 +3,25 @@
 All notable changes to this package are documented in this file.
 本文件记录本包的重要变更。
 
+## [0.3.1] - 2026-11-05
+
+**Actually await the backup child process / 把备份子进程真正 await 到结束**
+
+- Desktop hosts silently cancel a child process that the `tools/post-execute` handler has **not awaited** by the time
+  the tool call returns: no error, no log line, no process start. `scheduleAutoBackup` now awaits the whole round
+  (debounce → executor → done) and the handler awaits it, so the backup actually runs. Cost: the triggering tool call
+  waits about 15–20 s longer when a backup fires.
+- Debounce merging stays correct in the awaited form: a later call cancels the earlier waiter immediately and runs the
+  single backup itself, so two overlapping writes still produce one backup.
+- Smoke section 14 now also asserts that the executor has finished **when the handler returns** — the regression this
+  release fixes.
+
+- 桌面端宿主会在工具调用返回后**静默取消**「handler 还没 await 完的子进程」——不报错、不记日志、进程也不启动。
+  `scheduleAutoBackup` 改为 await 整轮（去抖 → 执行器 → 结束），handler 也 await 它，备份才真的会跑。
+  代价＝触发备份的那次工具调用多等约 15–20 秒。
+- 去抖合并在 await 形态下仍然正确：后一次调用立刻让前一个等待者返回、由后一次统一跑，两次重叠写入仍只备份一次。
+- 冒烟测试第 14 节新增断言「handler 返回时执行器已完成」——正是本版修掉的回归。
+
 ## [0.3.0] - 2026-11-05
 
 **Audit-then-backup: commit skills only after a clean audit / 审核通过后自动入库，不再需要常驻进程**
