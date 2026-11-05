@@ -555,6 +555,11 @@ console.log('--- 14) autoBackup: 审核通过才触发、await 到跑完、失�
     const backupCall = calls.find((a) => a.some((x) => String(x).includes('fake-auto-backup.ps1')))
     check('执行器收到 -Once', !!backupCall && backupCall.includes('-Once'), JSON.stringify(backupCall))
     check(
+      '执行器显式收到 -LiveRoot（子进程是干净环境，不能依赖 DSH_HOME 环境变量）',
+      !!backupCall && backupCall.includes('-LiveRoot') && backupCall.includes(skillsRoot),
+      JSON.stringify(backupCall && backupCall.filter((x) => String(x).includes('LiveRoot'))),
+    )
+    check(
       '执行器以 PowerShell 启动',
       !!backupCall && /powershell/i.test(String(backupCall[0])),
       JSON.stringify(backupCall && backupCall[0]),

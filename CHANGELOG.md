@@ -3,6 +3,31 @@
 All notable changes to this package are documented in this file.
 本文件记录本包的重要变更。
 
+## [0.3.2] - 2026-11-05
+
+**Survive the clean subprocess environment / 适配「干净的」子进程环境**
+
+- Desktop-host finding (2026-11-05): the child process started from `tools/post-execute` receives a **clean
+  environment** — `DSH_HOME`, `DSH_PROFILE` and `USERPROFILE` may all be absent. The executor therefore fell back
+  to the `web` profile, could not resolve the backup repo root, and exited with code 2: the audit ran, but the
+  backup silently never committed. Fixed on both sides:
+  - the plugin now passes `-LiveRoot <skillsRoot>` explicitly (it already knows that path);
+  - `skill/scripts/auto-backup-skills.ps1` derives `DSH_HOME` and the active profile **from its own path** when the
+    environment variables are missing (`<DSH_HOME>\profiles\<profile>\node_modules\...` for the bundled copy,
+    `<DSH_HOME>\skills\<skill>\scripts\...` for the live copy).
+- Smoke section 14 asserts that the executor receives `-LiveRoot` together with the live skills root.
+- Separate finding worth honouring: a profile patch entry that overrides plugin config **must carry `name` as well
+  as `id`** — with `id` alone the config never reaches the plugin (`config` stays empty, `autoBackupEnabled` false),
+  which is why 0.3.0/0.3.1 looked like a no-op on a desktop host even though the value was in the file.
+
+- 桌面端实测（2026-11-05）：`tools/post-execute` 起的子进程拿到的是**干净环境**——`DSH_HOME`、`DSH_PROFILE`、
+  `USERPROFILE` 可能全都没有。执行器因此默认按 `web` profile 找配置，取不到备份仓根、退出码 2（审核照常跑、
+  备份静默不提交）。两侧同时修：插件显式传 `-LiveRoot <skillsRoot>`；执行器在环境变量缺失时**从脚本自身位置
+  反推** `DSH_HOME` 与活动 profile。
+- 冒烟测试第 14 节新增断言：执行器收到 `-LiveRoot` 与 live 技能根。
+- 另一个实测结论：profile 补丁层覆盖插件配置的条目**必须同时带 `name`**——只写 `id` + `config` 时配置根本
+  到不了插件（`config` 为空、`autoBackupEnabled` 为假），这正是 0.3.0/0.3.1 在桌面端看起来「毫无作用」的原因。
+
 ## [0.3.1] - 2026-11-05
 
 **Actually await the backup child process / 把备份子进程真正 await 到结束**

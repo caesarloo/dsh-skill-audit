@@ -51,8 +51,37 @@ param(
 $ErrorActionPreference = 'Continue'
 
 # ---------- 路径现测 ----------
-$dshHome = if ($env:DSH_HOME) { $env:DSH_HOME } elseif ($env:USERPROFILE) { Join-Path $env:USERPROFILE '.dsh' } else { $null }
-$profileName = if ($env:DSH_PROFILE) { $env:DSH_PROFILE } else { 'web' }
+# 2026-11-05 补：插件的 ctx.subprocess 起的子进程可能拿不到 DSH_HOME / DSH_PROFILE / USERPROFILE
+# （实测干净环境下 DSH_PROFILE 丢失 → 本脚本默认按 web profile 找备份仓配置 → 取不到 repoDir → exit 2）。
+# 因此环境变量取不到时，从脚本自身位置反推：包内副本固定落在 <DSH_HOME>\profiles\<profile>\node_modules\...，
+# live 副本落在 <DSH_HOME>\skills\<技能名>\scripts\...。
+function Resolve-DshHomeFromScriptPath {
+    if (-not $PSCommandPath) { return $null }
+    $dir = Split-Path -Parent $PSCommandPath
+    for ($i = 0; $i -lt 10 -and $dir; $i++) {
+        $leaf = Split-Path -Leaf $dir
+        if ($leaf -eq 'skills' -or $leaf -eq 'profiles') { return (Split-Path -Parent $dir) }
+        $dir = Split-Path -Parent $dir
+    }
+    return $null
+}
+function Resolve-ProfileNameFromScriptPath {
+    if (-not $PSCommandPath) { return $null }
+    $m = [regex]::Match($PSCommandPath, '[\\/]profiles[\\/]([^\\/]+)[\\/]node_modules[\\/]')
+    if ($m.Success) { return $m.Groups[1].Value }
+    return $null
+}
+$dshHome = if ($env:DSH_HOME) { $env:DSH_HOME } elseif ($env:USERPROFILE) { Join-Path $env:USERPROFILE '.dsh' } else { Resolve-DshHomeFromScriptPath }
+$profileName = if ($env:DSH_PROFILE) { $env:DSH_PROFILE } else { $null }
+if (-not $profileName) { $profileName = Resolve-ProfileNameFromScriptPath }
+if (-not $profileName -and $dshHome) {
+    $profilesRoot = Join-Path $dshHome 'profiles'
+    if (Test-Path -LiteralPath $profilesRoot) {
+        $pdirs = @(Get-ChildItem -LiteralPath $profilesRoot -Directory -ErrorAction SilentlyContinue | Where-Object { Test-Path -LiteralPath (Join-Path $_.FullName 'cordis.patch.yml') })
+        if ($pdirs.Count -eq 1) { $profileName = $pdirs[0].Name }
+    }
+}
+if (-not $profileName) { $profileName = 'web' }
 if (-not $LiveRoot) {
     if (-not $dshHome) { Write-Output '[错误] 取不到 DSH_HOME（也取不到 USERPROFILE）'; exit 2 }
     $LiveRoot = Join-Path $dshHome 'skills'

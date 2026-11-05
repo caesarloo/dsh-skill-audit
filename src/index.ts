@@ -498,7 +498,19 @@ export function apply(ctx: Context, config: SkillAuditConfig = {}): void {
     }
     autoBackupRunning = true
     try {
-      const argv = [powershell, '-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', script, '-Once']
+      const argv = [
+        powershell,
+        '-NoProfile',
+        '-ExecutionPolicy',
+        'Bypass',
+        '-File',
+        script,
+        '-Once',
+        // 显式给出 live 技能根：插件的子进程拿的是**干净环境**（2026-11-05 实测 DSH_HOME / DSH_PROFILE /
+        // USERPROFILE 都可能缺失），不能指望执行器从环境变量里自己拿到它。
+        '-LiveRoot',
+        skillsRoot,
+      ]
       if (autoBackupCfg?.repoDir) argv.push('-RepoRoot', autoBackupCfg.repoDir)
       if (!autoBackupPush) argv.push('-NoPush')
       const handle = ctx.subprocess.spawn({
