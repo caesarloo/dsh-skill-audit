@@ -13,6 +13,11 @@
 # 安全边界：
 #   · 只把「live 有、仓库缺或内容不同」的文件同步进仓库；**live 删掉的文件不会从仓库删**（只增不删），
 #     避免把仓库内容清掉；
+#   · **已登记归档的技能一律不写回**（2026-11-05 新增）：读备份仓顶层 `archived-skills.json`，
+#     登记过且未恢复（`restoredAt` 为空）的技能跳过、不复制不提交，日志记 `SKIP-ARCHIVED`。
+#     为什么：归档要求「从 live 与仓库 skills/ 双双移除」，而本通道只增不删 —— live 侧只要还残留
+#     已归档技能，本通道就会把整个目录重新写回仓库，把归档抵消掉（2026-11-05 实测：
+#     `company-doc-revision-loop` 的归档提交之后，本通道 18:45 又把它写回仓库，收尾闸门看不见）；
 #   · 审核 fail ≠ 0 → 一个都不提交（整批跳过，日志列出失败条目）；
 #   · 暂停开关：暂停文件存在即完全不动作（默认 <DSH_HOME>\vet\skill-auto-backup\PAUSE）；
 #   · -DryRun 只报告将做什么，不复制、不提交；
@@ -164,12 +169,29 @@ function Get-SkillFileMap {
     return $map
 }
 
+# ---------- 已登记归档的技能（2026-11-05 新增护栏，读备份仓 archived-skills.json）----------
+function Get-ArchivedSkillNames {
+    param([string]$Root)
+    $set = @{}
+    $p = Join-Path $Root 'archived-skills.json'
+    if (-not (Test-Path -LiteralPath $p)) { return $set }
+    try { $j = [System.IO.File]::ReadAllText($p) | ConvertFrom-Json } catch { return $set }
+    foreach ($a in @($j.archived)) {
+        if (-not $a -or -not $a.name) { continue }
+        if ($a.restoredAt) { continue }          # 已恢复过的记录不算归档
+        $set[[string]$a.name] = $true
+    }
+    return $set
+}
+
 # 只把「live 有、仓库缺或内容不同」算差异；live 删掉的文件不算（只增不删）
+# 已登记归档的技能不参与比对（由脚本头部 $script:ArchivedNames 提供，每轮刷新）
 function Get-ChangedSkills {
     param([hashtable]$LiveMap, [hashtable]$RepoMap)
     $changed = @()
     foreach ($s in ($LiveMap.Keys | Sort-Object)) {
         if ($Skills -and ($Skills -notcontains $s)) { continue }
+        if ($script:ArchivedNames -and $script:ArchivedNames.ContainsKey($s)) { $script:SkippedArchived += $s; continue }
         $lf = $LiveMap[$s]
         if (-not $RepoMap.ContainsKey($s)) { $changed += $s; continue }
         $rf = $RepoMap[$s]
@@ -215,9 +237,14 @@ function Sync-SkillToRepo {
 # ---------- 处理一轮 ----------
 function Invoke-OneRound {
     if ($PauseFile -and (Test-Path -LiteralPath $PauseFile)) { Write-Log 'PAUSED 暂停文件存在，本轮跳过'; $script:RoundResult = 'PAUSED'; return }
+    $script:ArchivedNames = Get-ArchivedSkillNames $RepoRoot
+    $script:SkippedArchived = @()
     $liveMap = Get-SkillFileMap $LiveRoot
     $repoMap = Get-SkillFileMap (Join-Path $RepoRoot 'skills')
     $changed = Get-ChangedSkills -LiveMap $liveMap -RepoMap $repoMap
+    if ($script:SkippedArchived.Count -gt 0) {
+        Write-Log ('SKIP-ARCHIVED 以下技能已登记归档（archived-skills.json），不写回仓库：' + ((@($script:SkippedArchived) | Sort-Object -Unique) -join ', '))
+    }
     if ($changed.Count -eq 0) { Write-Log 'NO-CHANGE 两侧一致，无需备份'; $script:RoundResult = 'NO-CHANGE'; return }
     if ($changed.Count -gt $MaxSkillsPerRun) {
         Write-Log ('LIMIT 本轮差异技能 ' + $changed.Count + ' 个，超过上限 ' + $MaxSkillsPerRun + '，只处理前 ' + $MaxSkillsPerRun + ' 个')
@@ -290,9 +317,14 @@ $lastChangeAt = Get-Date
 while ($true) {
     Start-Sleep -Seconds $PollSeconds
     try {
+        $script:ArchivedNames = Get-ArchivedSkillNames $RepoRoot
+        $script:SkippedArchived = @()
         $liveMap = Get-SkillFileMap $LiveRoot
         $repoMap = Get-SkillFileMap (Join-Path $RepoRoot 'skills')
         $changed = Get-ChangedSkills -LiveMap $liveMap -RepoMap $repoMap
+        if ($script:SkippedArchived.Count -gt 0) {
+            Write-Log ('SKIP-ARCHIVED 以下技能已登记归档（archived-skills.json），不写回仓库：' + ((@($script:SkippedArchived) | Sort-Object -Unique) -join ', '))
+        }
         $sig = (@($changed | Sort-Object) -join ',')
         if ($sig -ne $prevSig) {
             $prevSig = $sig

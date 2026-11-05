@@ -3,6 +3,32 @@
 All notable changes to this package are documented in this file.
 本文件记录本包的重要变更。
 
+## [0.3.3] - 2026-11-05
+
+**Never write archived skills back / 已登记归档的技能不再被写回仓库**
+
+- Executor fix (`skill/scripts/auto-backup-skills.ps1`, both the bundled copy and the live copy under
+  `skills/skill-audit-ops/scripts/` are byte-identical again): read the backup repo's top-level
+  `archived-skills.json` at the start of every round and **skip every skill registered there whose record has no
+  `restoredAt`**. Previously the executor was additive-only ("live has it, repo lacks it → copy"), so a skill that
+  had been archived on one machine but was still present in a stale live tree was copied straight back into
+  `skills/` — silently undoing the archive, and invisible to the closeout gates because both sides then agreed.
+  Logs a new result code `SKIP-ARCHIVED` naming the skipped skills.
+- Why it matters (2026-11-05, real incident): commit `d7e169d` archived `company-doc-revision-loop` (frozen into
+  `skills-archive/`, registered in `archived-skills.json`, removed from `skills/`), but the live copy lingered on the
+  authoring machine and this executor wrote the whole directory back within minutes (commit `95d1b03`). The
+  after-pull closeout then saw both sides agreeing and reported `READY` — the archive had been silently reverted.
+  The closeout gained a matching guard that same day (`REPO-ARCHIVED` cleanup), and this release closes the loop on
+  the write-back side.
+- 执行器修复（包内副本与 live 副本重新逐字节一致）：每轮开始先读备份仓顶层 `archived-skills.json`，对**已登记归档、
+  且记录没有 `restoredAt`** 的技能一律跳过。此前本通道「只增不删」，会把别的机器已归档、本机 live 还残留的技能整目录
+  复制回 `skills/`，等于**悄悄撤销归档**；而收尾闸门因为两侧都有该目录，完全看不见。新增结果码 `SKIP-ARCHIVED`
+  并在日志里列出被跳过的技能。
+- 真实事故（2026-11-05）：`d7e169d` 把 `company-doc-revision-loop` 归档（冻结到 `skills-archive/`、登记
+  `archived-skills.json`、从 `skills/` 删除），但作者机 live 残留仍在，本执行器几分钟内就把整个目录写回仓库
+  （提交 `95d1b03`）；随后拉取收尾看到两侧一致、报 `READY`，归档已实质失效。当天收尾侧已加对应护栏
+  （`REPO-ARCHIVED` 清理），本版把「写回」这一侧也补上。
+
 ## [0.3.2] - 2026-11-05
 
 **Survive the clean subprocess environment / 适配「干净的」子进程环境**
