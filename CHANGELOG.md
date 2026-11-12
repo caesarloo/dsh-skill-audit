@@ -3,6 +3,20 @@
 All notable changes to this package are documented in this file.
 本文件记录本包的重要变更。
 
+## [0.3.5] - 2026-11-13
+
+**Version read is no longer truncated / 版本读取不再截断，写回护栏不再漏技能**
+
+- Executor fix (`skill/scripts/auto-backup-skills.ps1`): `Get-SkillVersion` used
+  `Get-Content -TotalCount 40`, so a `SKILL.md` whose `version` line sits past line 40 was read as
+  "unknown version" — and the write-direction guard (`SKIP-REPO-VERSION`) **silently failed open** for
+  that skill. Real case measured on this host: `r-d-ledger-maintenance` has `version` on **line 113**.
+  Now reads the whole file. Verified on this host with a throwaway isolation fixture (kept outside the
+  repo); the shipped smoke suite does not add a behaviour-level case for this.
+- 执行器修复：`Get-SkillVersion` 原本只读 `SKILL.md` 前 40 行找 `version`，`version` 落在 40 行之后的技能
+  会被判成「读不到版本」，于是**写回方向护栏对它的 fail-open**（不挡）。本机实测命中：
+  `r-d-ledger-maintenance` 的 version 在 **L113**。改为读全文；已用一次性隔离夹具在本机验证（夹具不在仓库内），本次未给 smoke 增加该行为级用例。
+
 ## [0.3.4] - 2026-11-13
 
 **Never roll the repo back + never commit a half-resolved merge / 不把仓库改旧、不替人提交没解完的合并**

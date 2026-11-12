@@ -199,7 +199,9 @@ function Get-SkillVersion {
     $f = Join-Path $SkillDir 'SKILL.md'
     if (-not (Test-Path -LiteralPath $f)) { return $null }
     try {
-        foreach ($line in (Get-Content -LiteralPath $f -TotalCount 40 -Encoding UTF8)) {
+        # 不限制行数：version 可能落在 frontmatter 很靠后的位置（2026-11-13 实测 r-d-ledger-maintenance 在 L113），
+        # 旧写法 -TotalCount 40 读不到 → 写回护栏对该技能 fail-open（0.3.5 修）
+        foreach ($line in (Get-Content -LiteralPath $f -Encoding UTF8)) {
             if ($line -match '^version:\s*(.+?)\s*$') { return $matches[1].Trim().Trim("'").Trim('"') }
         }
     } catch { }
