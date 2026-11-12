@@ -3,6 +3,34 @@
 All notable changes to this package are documented in this file.
 本文件记录本包的重要变更。
 
+## [0.3.4] - 2026-11-13
+
+**Never roll the repo back + never commit a half-resolved merge / 不把仓库改旧、不替人提交没解完的合并**
+
+- Executor (`skill/scripts/auto-backup-skills.ps1`; the bundled copy and the live
+  `skills/skill-audit-ops/scripts/` copy are byte-identical again):
+  - **Three-layer audit result** — the audit engine's JSON shares stdout with any external program the rules
+    invoke (`git` / `python`), so parsing it wholesale fails and the whole round was mislabelled `AUDIT-ERROR`
+    (14 consecutive rounds were silently skipped on 2026-11-12). Now: ① stdout with stderr kept separate;
+    ② fall back to the engine's own `vet/skill-audits/audit-<ts>.json` — **only the file produced by *this* round**
+    (pre-call snapshot) and only if it covers every skill named this round; ③ otherwise archive stdout+stderr to
+    `audit-raw-<ts>.txt` and stay fail-closed. Logs `AUDIT-FALLBACK` when layer ② is used.
+  - **Write-direction guard** — compares `SKILL.md` versions before copying; **never writes back when the repo
+    version ≥ the live version** (`SKIP-REPO-VERSION`; per skill `SKIP-REPO-NEWER` / `SKIP-REPO-SAME`). Fixes the
+    2026-11-12 incident where a stale live tree overwrote another machine's newer file (commit `6052fc3`), after
+    which even a version bump kept re-installing the stale content.
+  - **Merge guard** — skips the whole round while the backup repo has `.git\MERGE_HEAD` / `CHERRY_PICK_HEAD` /
+    `REVERT_HEAD`, or a touched skill file contains conflict markers (`SKIP-MERGING`). Fixes the 2026-11-05 case
+    where a half-resolved merge was committed with the wrong version number (commit `fa2eb63`).
+- Smoke test now asserts the bundled executor still carries all five capabilities (`SKIP-ARCHIVED`,
+  `SKIP-MERGING`, `SKIP-REPO-VERSION`, `AUDIT-FALLBACK`, `Save-AuditRaw`) and no longer passes `-NoLog`, so a
+  one-sided edit of the two executor copies fails the build instead of silently shipping.
+- 执行器（包内与 live 两份重新逐字节一致）：① **审核结果三层取值**（stdout/stderr 分开收 → 回落引擎落盘档案、
+  只认本轮新产生的且技能集合对得上 → 都失败则原文留档 `audit-raw-*.txt` 并 fail-closed；用第②层记
+  `AUDIT-FALLBACK`）；② **写回方向护栏**（仓库版本 ≥ live 版本一律不写回，`SKIP-REPO-VERSION`，绝不把仓库
+  改旧）；③ **合并现场护栏**（备份仓有 `MERGE_HEAD` 等、或技能文件含冲突标记时整轮跳过，`SKIP-MERGING`）。
+  smoke 增加五项能力与「不再传 `-NoLog`」断言，两份副本只改一份会在发布前失败。
+
 ## [0.3.3] - 2026-11-05
 
 **Never write archived skills back / 已登记归档的技能不再被写回仓库**

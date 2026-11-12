@@ -18,6 +18,14 @@
 #     为什么：归档要求「从 live 与仓库 skills/ 双双移除」，而本通道只增不删 —— live 侧只要还残留
 #     已归档技能，本通道就会把整个目录重新写回仓库，把归档抵消掉（2026-11-05 实测：
 #     `company-doc-revision-loop` 的归档提交之后，本通道 18:45 又把它写回仓库，收尾闸门看不见）；
+#   · **写回方向护栏（2026-11-13 新增）**：复制前先比 `SKILL.md` 的 `version` —— **仓库版本 ≥ live 版本
+#     时一律不写回**（日志 `SKIP-REPO-VERSION`，逐技能标 `SKIP-REPO-NEWER` / `SKIP-REPO-SAME`）。
+#     为什么：本机 live 落后远端时，旧实现会把远端新版覆盖成旧 live（2026-11-12 实测 `6052fc3` 把
+#     15,621B 的 R8 落地版覆盖成 13,781B），而且事后「bump 再升级」仍从被写回的工作副本取内容、越升越旧；
+#   · **合并现场护栏（2026-11-13 新增）**：备份仓存在 `.git\MERGE_HEAD`、或待写回的技能文件里含冲突标记
+#     （`<<<<<<<` / `>>>>>>>`）时，本轮整轮跳过（日志 `SKIP-MERGING`）。
+#     为什么：自动备份的触发有延迟，人工解冲突期间它不露面，等下一次技能写入才整仓扫描 —— 会把还没解完的
+#     合并现场连同错误的版本号一起提交（2026-11-05 实测 `fa2eb63` 把 1.6.1 固化成 1.5.10）；
 #   · 审核 fail ≠ 0 → 一个都不提交（整批跳过，日志列出失败条目）；
 #   · 暂停开关：暂停文件存在即完全不动作（默认 <DSH_HOME>\vet\skill-auto-backup\PAUSE）；
 #   · -DryRun 只报告将做什么，不复制、不提交；
@@ -184,6 +192,63 @@ function Get-ArchivedSkillNames {
     return $set
 }
 
+# ---------- 写回方向护栏（2026-11-13，0.3.4）：绝不把仓库改旧 ----------
+function Get-SkillVersion {
+    param([string]$SkillDir)
+    if (-not $SkillDir -or -not (Test-Path -LiteralPath $SkillDir)) { return $null }
+    $f = Join-Path $SkillDir 'SKILL.md'
+    if (-not (Test-Path -LiteralPath $f)) { return $null }
+    try {
+        foreach ($line in (Get-Content -LiteralPath $f -TotalCount 40 -Encoding UTF8)) {
+            if ($line -match '^version:\s*(.+?)\s*$') { return $matches[1].Trim().Trim("'").Trim('"') }
+        }
+    } catch { }
+    return $null
+}
+
+# 返回 1＝Left 比 Right 新，0＝相同，-1＝Left 比 Right 旧，$null＝无法比较（新建技能/格式不符）
+function Compare-SkillVersion {
+    param([string]$Left, [string]$Right)
+    if (-not $Left -or -not $Right) { return $null }
+    $pl = @($Left.Trim() -split '\.')
+    $pr = @($Right.Trim() -split '\.')
+    if ($pl.Count -lt 2 -or $pr.Count -lt 2) { return $null }
+    $n = [Math]::Max($pl.Count, $pr.Count)
+    for ($i = 0; $i -lt $n; $i++) {
+        $vl = -1; $vr = -1
+        if ($i -lt $pl.Count) { [void][int]::TryParse(($pl[$i] -replace '[^0-9].*$', ''), [ref]$vl) }
+        if ($i -lt $pr.Count) { [void][int]::TryParse(($pr[$i] -replace '[^0-9].*$', ''), [ref]$vr) }
+        if ($vl -lt 0 -or $vr -lt 0) { return $null }
+        if ($vl -gt $vr) { return 1 }
+        if ($vl -lt $vr) { return -1 }
+    }
+    return 0
+}
+
+# ---------- 合并现场护栏（2026-11-13，0.3.4）：合并/冲突时本轮跳过 ----------
+# 返回命中的原因字符串；$null ＝没有合并现场
+function Test-MergeInProgress {
+    param([string[]]$SkillNames)
+    $gitDir = Join-Path $RepoRoot '.git'
+    foreach ($marker in @('MERGE_HEAD', 'CHERRY_PICK_HEAD', 'REVERT_HEAD')) {
+        $p = Join-Path $gitDir $marker
+        if (Test-Path -LiteralPath $p) { return ('备份仓存在 .git\' + $marker) }
+    }
+    if ($SkillNames) {
+        foreach ($s in $SkillNames) {
+            $dir = Join-Path $LiveRoot $s
+            if (-not (Test-Path -LiteralPath $dir)) { continue }
+            foreach ($f in @(Get-ChildItem -LiteralPath $dir -Recurse -File -Include *.md,*.ps1,*.json -ErrorAction SilentlyContinue)) {
+                try {
+                    $head = [System.IO.File]::ReadAllText($f.FullName)
+                    if ($head -match '(?m)^<<<<<<< ') { return ('技能文件含冲突标记：' + (Split-Path -Leaf $f.FullName)) }
+                } catch { }
+            }
+        }
+    }
+    return $null
+}
+
 # 只把「live 有、仓库缺或内容不同」算差异；live 删掉的文件不算（只增不删）
 # 已登记归档的技能不参与比对（由脚本头部 $script:ArchivedNames 提供，每轮刷新）
 function Get-ChangedSkills {
@@ -202,15 +267,64 @@ function Get-ChangedSkills {
     return @($changed)
 }
 
+# ---------- 解析失败时留原文（只留最近 10 份，写在日志同目录）----------
+function Save-AuditRaw {
+    param([string]$Stdout, [string]$Stderr, [int]$ExitCode)
+    try {
+        $dir = $null
+        if ($script:LogPath) { $dir = Split-Path -Parent $script:LogPath }
+        elseif ($dshHome) { $dir = Join-Path $dshHome 'vet\skill-auto-backup' }
+        if (-not $dir) { return $null }
+        if (-not (Test-Path -LiteralPath $dir)) { New-Item -ItemType Directory -Path $dir -Force | Out-Null }
+        $f = Join-Path $dir ('audit-raw-' + (Get-Date -Format 'yyyyMMdd-HHmmss') + '.txt')
+        $body = 'exit=' + $ExitCode + "`n=== stdout ===`n" + $Stdout + "`n=== stderr ===`n" + $Stderr + "`n"
+        [System.IO.File]::WriteAllText($f, $body, (New-Object System.Text.UTF8Encoding($false)))
+        $old = @(Get-ChildItem -LiteralPath $dir -File -Filter 'audit-raw-*.txt' | Sort-Object LastWriteTime -Descending | Select-Object -Skip 10)
+        foreach ($o in $old) { Remove-Item -LiteralPath $o.FullName -Force -ErrorAction SilentlyContinue }
+        return (Split-Path -Leaf $f)
+    } catch { return $null }
+}
+
 # ---------- 审核（fail = 0 才算通过）----------
+# 2026-11-12 改（根因实测）：判据里只要调了外部程序（git / python），那个程序的输出就会混进引擎打到
+# stdout 的那份 JSON，ConvertFrom-Json 必失败 → 整轮被记成 AUDIT-ERROR 白白跳过（旧写法还把 stderr 用
+# 2>&1 并进 stdout，混得更彻底；2026-11-12 19:25–19:36 连跳 14 轮就是这个）。三层取结果：
+#   ① stdout —— stderr 改为单独收（2>$errLines），不再混进 JSON；
+#   ② 引擎自己落盘的审核档案 <DSH_HOME>\vet\skill-audits\audit-<时间戳>.json（去掉 -NoLog 它就会写，
+#      与 stdout 同一份 payload、UTF-8 无 BOM）——只在①解析不出时回落，且必须核对档案里的技能集合
+#      与本轮点名的一致，绝不拿别的轮次的结果放行未审核的内容；
+#   ③ 两层都不行 → 原文整份留档成 audit-raw-*.txt，本轮仍按失败跳过（fail-closed 不变）。
 function Invoke-SkillAudit {
     param([string[]]$Names)
     if (-not $Names -or $Names.Count -eq 0) { return $null }
-    $out = & powershell -NoProfile -ExecutionPolicy Bypass -File $EnginePath -SkillsRoot $LiveRoot -Skill ($Names -join ',') -Json -NoLog 2>&1
+    $auditDir = if ($dshHome) { Join-Path $dshHome 'vet\skill-audits' } else { $null }
+    # 调用前快照已存在的档案：回落只认「本轮新产生」的那份，否则同一批技能在 2 秒窗口内重跑时会读到
+    # 上一轮的结果（2026-11-13 隔离测试 T5 实测命中：上一轮档案被误用，本该 AUDIT-ERROR 反而放行）
+    $preAuditFiles = @{}
+    if ($auditDir -and (Test-Path -LiteralPath $auditDir)) {
+        foreach ($pf in @(Get-ChildItem -LiteralPath $auditDir -File -Filter 'audit-*.json' -ErrorAction SilentlyContinue)) { $preAuditFiles[$pf.Name] = $true }
+    }
+    $started = Get-Date
+    $errLines = @()
+    $out = & powershell -NoProfile -ExecutionPolicy Bypass -File $EnginePath -SkillsRoot $LiveRoot -Skill ($Names -join ',') -Json 2>$errLines
     $code = $LASTEXITCODE
     $text = ($out | Out-String)
     $obj = $null
     try { $obj = $text | ConvertFrom-Json } catch { }
+    $via = 'stdout'
+    if (-not $obj -and $auditDir -and (Test-Path -LiteralPath $auditDir)) {
+        foreach ($cf in @(Get-ChildItem -LiteralPath $auditDir -File -Filter 'audit-*.json' -ErrorAction SilentlyContinue |
+                          Where-Object { $_.LastWriteTime -ge $started.AddSeconds(-2) } |
+                          Sort-Object LastWriteTime -Descending)) {
+            if ($preAuditFiles.ContainsKey($cf.Name)) { continue }
+            $o2 = $null
+            try { $o2 = ([System.IO.File]::ReadAllText($cf.FullName, [System.Text.Encoding]::UTF8)) | ConvertFrom-Json } catch { continue }
+            if (-not $o2 -or -not $o2.results) { continue }
+            $got = @($o2.results | ForEach-Object { $_.skill })
+            if (@($Names | Where-Object { $got -notcontains $_ }).Count -gt 0) { continue }
+            $obj = $o2; $via = 'audit-json'; break
+        }
+    }
     $fails = @()
     if ($obj) {
         foreach ($r in @($obj.results)) {
@@ -219,8 +333,16 @@ function Invoke-SkillAudit {
             }
         }
     }
-    # fail-closed：解析不出 JSON（引擎异常 / 技能不存在 / 参数错）一律当失败，绝不默认放行
-    if (-not $obj) { return [pscustomobject]@{ ExitCode = $code; FailCount = -1; Fails = @('审核引擎输出无法解析，已按 fail-closed 处理'); Raw = $text } }
+    $errText = (@($errLines) | ForEach-Object { ("$_").Trim() } | Where-Object { $_ }) -join "`n"
+    # fail-closed：三层都拿不到结果（引擎异常 / 技能不存在 / 参数错）一律当失败，绝不默认放行
+    if (-not $obj) {
+        $dump = Save-AuditRaw -Stdout $text -Stderr $errText -ExitCode $code
+        $note = if ($dump) { '原文已留档 ' + $dump } else { '原文留档也失败' }
+        return [pscustomobject]@{ ExitCode = $code; FailCount = -1; Fails = @("审核结果无法解析（$note），已按 fail-closed 处理"); Raw = ($text + "`n[stderr] " + $errText) }
+    }
+    if ($via -ne 'stdout') {
+        Write-Log ('AUDIT-FALLBACK stdout 被外部程序输出污染，本轮改用引擎落盘审核档案解析（' + @($obj.results).Count + ' 个技能，已核对技能集合与本轮点名一致）')
+    }
     return [pscustomobject]@{ ExitCode = $code; FailCount = @($fails).Count; Fails = $fails; Raw = $text }
 }
 
@@ -237,6 +359,12 @@ function Sync-SkillToRepo {
 # ---------- 处理一轮 ----------
 function Invoke-OneRound {
     if ($PauseFile -and (Test-Path -LiteralPath $PauseFile)) { Write-Log 'PAUSED 暂停文件存在，本轮跳过'; $script:RoundResult = 'PAUSED'; return }
+    # 合并现场护栏（2026-11-13）：合并/冲突没解完时整轮跳过，不替人把现场提交进仓
+    $mergeReason = Test-MergeInProgress -SkillNames @($Skills)
+    if ($mergeReason) {
+        Write-Log ('SKIP-MERGING ' + $mergeReason + '，本轮跳过：自动备份不替人提交没解完的合并现场')
+        $script:RoundResult = 'SKIP-MERGING'; return
+    }
     $script:ArchivedNames = Get-ArchivedSkillNames $RepoRoot
     $script:SkippedArchived = @()
     $liveMap = Get-SkillFileMap $LiveRoot
@@ -246,6 +374,25 @@ function Invoke-OneRound {
         Write-Log ('SKIP-ARCHIVED 以下技能已登记归档（archived-skills.json），不写回仓库：' + ((@($script:SkippedArchived) | Sort-Object -Unique) -join ', '))
     }
     if ($changed.Count -eq 0) { Write-Log 'NO-CHANGE 两侧一致，无需备份'; $script:RoundResult = 'NO-CHANGE'; return }
+    # 写回方向护栏（2026-11-13）：仓库版本 ≥ live 版本 → 不写回，绝不把仓库改旧
+    $skippedVersion = @()
+    $kept = @()
+    foreach ($s in $changed) {
+        $lv = Get-SkillVersion (Join-Path $LiveRoot $s)
+        $rv = Get-SkillVersion (Join-Path (Join-Path $RepoRoot 'skills') $s)
+        $cmp = Compare-SkillVersion -Left $rv -Right $lv
+        if ($null -ne $cmp -and $cmp -ge 0) { $skippedVersion += [pscustomobject]@{ Skill = $s; Repo = $rv; Live = $lv; Cmp = $cmp }; continue }
+        $kept += $s
+    }
+    if ($skippedVersion.Count -gt 0) {
+        foreach ($x in $skippedVersion) {
+            if ($x.Cmp -gt 0) { Write-Log ('    SKIP-REPO-NEWER  ' + $x.Skill + '：仓库 ' + $x.Repo + ' 高于 live ' + $x.Live + '（本机 live 落后，先升级再改）') }
+            else { Write-Log ('    SKIP-REPO-SAME   ' + $x.Skill + '：仓库与 live 版本同为 ' + $x.Live + ' 但内容不同（若确实改了内容，请 bump 版本号后重试）') }
+        }
+        Write-Log ('SKIP-REPO-VERSION 以下技能因仓库版本不低于 live 而不写回：' + (($skippedVersion | ForEach-Object { $_.Skill }) -join ', '))
+    }
+    $changed = @($kept)
+    if ($changed.Count -eq 0) { Write-Log 'NO-CHANGE 剩余差异都因仓库版本不低于 live 被护栏跳过，本轮不写回'; $script:RoundResult = 'SKIP-REPO-VERSION'; return }
     if ($changed.Count -gt $MaxSkillsPerRun) {
         Write-Log ('LIMIT 本轮差异技能 ' + $changed.Count + ' 个，超过上限 ' + $MaxSkillsPerRun + '，只处理前 ' + $MaxSkillsPerRun + ' 个')
         $changed = @($changed | Select-Object -First $MaxSkillsPerRun)

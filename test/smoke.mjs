@@ -615,6 +615,24 @@ console.log('--- 14) autoBackup: 审核通过才触发、await 到跑完、失�
   }
 }
 
+// ---------- bundled executor capability self-check (0.3.4) ----------
+// 目的：把「两份执行器副本只有一份改了」变成发布前可拦的失败（0.3.3 曾被这个坑咬中：
+// 先给 live 副本加归档护栏、包内仍是旧版，插件形态照旧写回仓库）。
+{
+  const execText = readFileSync(new URL('../skill/scripts/auto-backup-skills.ps1', import.meta.url), 'utf8')
+  const caps = [
+    ['SKIP-ARCHIVED', '归档护栏'],
+    ['SKIP-MERGING', '合并现场护栏'],
+    ['SKIP-REPO-VERSION', '写回方向护栏'],
+    ['AUDIT-FALLBACK', '审核结果三层取值'],
+    ['Save-AuditRaw', '解析失败原文留档'],
+  ]
+  for (const [needle, label] of caps) {
+    check(`bundled executor 含${label}（${needle}）`, execText.includes(needle))
+  }
+  check('bundled executor 不再把 -NoLog 传给引擎（否则自断回落第二层）', !/-Json\s+-NoLog/.test(execText))
+}
+
 rmSync(root, { recursive: true, force: true })
 console.log('')
 console.log(failures === 0 ? 'ALL SMOKE TESTS PASSED' : `FAILED CHECKS: ${failures}`)
